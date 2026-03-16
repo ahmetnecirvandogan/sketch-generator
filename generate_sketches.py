@@ -271,10 +271,27 @@ def _load_sam():
     return _sam_predictor
 
 
-def _threshold_mask(img_bgr: np.ndarray) -> np.ndarray:
+def _threshold_mask(
+    img_bgr: np.ndarray,
+    alpha:   "np.ndarray | None" = None,
+) -> np.ndarray:
+    """
+    Returns a binary uint8 mask (255 = object, 0 = background).
+
+    Priority:
+      1. Alpha channel from the RGBA render (1.0 = cloth, 0.0 = background).
+         This is pixel-perfect regardless of shadow darkness — even a cloth
+         pixel rendered as pure black (deep shadow) has alpha = 1.
+      2. Brightness threshold fallback for legacy RGB-only renders.
+    """
+    if alpha is not None and alpha.max() > 0:
+        _, mask = cv2.threshold(alpha, 10, 255, cv2.THRESH_BINARY)
+        k    = np.ones((5, 5), np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k, iterations=2)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k, iterations=1)
+        return mask
+    # Legacy fallback — brightness threshold on the beauty render
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-    # Threshold at 4 (was 8) to catch the dark fold/shadow areas on the
-    # right side of the scarf that a higher threshold would exclude from the mask.
     _, mask = cv2.threshold(gray, 4, 255, cv2.THRESH_BINARY)
     k = np.ones((7, 7), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k, iterations=2)
@@ -282,14 +299,18 @@ def _threshold_mask(img_bgr: np.ndarray) -> np.ndarray:
     return mask
 
 
-def get_object_mask(img_bgr: np.ndarray) -> np.ndarray:
+def get_object_mask(
+    img_bgr: np.ndarray,
+    alpha:   "np.ndarray | None" = None,
+) -> np.ndarray:
     """
     Returns binary uint8 mask (255 = object foreground).
-    Uses SAM with rough-centroid point-prompt when available.
+    Uses SAM with rough-centroid point-prompt when available;
+    otherwise falls back to _threshold_mask (alpha-based when available).
     """
     predictor = _load_sam()
     if predictor:
-        rough = _threshold_mask(img_bgr)
+        rough = _threshold_mask(img_bgr, alpha=alpha)
         ys, xs = np.where(rough > 0)
         cx = int(np.mean(xs)) if len(xs) else img_bgr.shape[1] // 2
         cy = int(np.mean(ys)) if len(ys) else img_bgr.shape[0] // 2
@@ -300,7 +321,7 @@ def get_object_mask(img_bgr: np.ndarray) -> np.ndarray:
             multimask_output=True,
         )
         return masks[np.argmax(scores)].astype(np.uint8) * 255
-    return _threshold_mask(img_bgr)
+    return _threshold_mask(img_bgr, alpha=alpha)
 
 
 def draw_organic_dashed_boundary(
@@ -816,11 +837,11 @@ def draw_annotations(
         draw.text((lx, ly), "Shadow", font=font_lg, fill=color, **HALO)
         _draw_arrow(draw, (lx + 84, ly + 13), (sx, sy), color, width=2)
 
-    # ── 3-line text block (top-left) ─────────────────────────────────────────
-    y = margin
-    for line in text_lines:
-        draw.text((margin, y), line, font=font_xs, fill=color, **HALO)
-        y += 20
+    # ── 3-line text block (top-left) — disabled ──────────────────────────────
+    # y = margin
+    # for line in text_lines:
+    #     draw.text((margin, y), line, font=font_xs, fill=color, **HALO)
+    #     y += 20
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -837,9 +858,19 @@ def generate_sketch(
     Full four-step pipeline.
     Returns a BGR uint8 image ready for cv2.imwrite.
     """
-    img_bgr = cv2.imread(render_path)
-    if img_bgr is None:
+    # Load as BGRA so we can extract the alpha channel saved by generate_dataset.
+    # cv2.IMREAD_UNCHANGED preserves all 4 channels when they exist.
+    img_raw = cv2.imread(render_path, cv2.IMREAD_UNCHANGED)
+    if img_raw is None:
         raise FileNotFoundError(f"Could not read: {render_path}")
+
+    if img_raw.ndim == 3 and img_raw.shape[2] == 4:
+        img_bgr = img_raw[:, :, :3]          # drop alpha for colour processing
+        alpha   = img_raw[:, :, 3]           # uint8 [0-255], 255 = cloth pixel
+    else:
+        img_bgr = img_raw                    # legacy RGB-only render
+        alpha   = None
+
     h, w = img_bgr.shape[:2]
 
     # Derive companion normal-map path: try PNG first, then NPY fallback.
@@ -856,7 +887,9 @@ def generate_sketch(
     canvas = np.full((h, w, 3), 255, dtype=np.uint8)
 
     # ── B: Segmentation mask  (needed before A so we can mask edges) ─────────
-    seg_mask = get_object_mask(img_bgr)
+    # Pass alpha so the mask is built from renderer coverage, not brightness.
+    # This ensures shadowed cloth areas are never excluded from the silhouette.
+    seg_mask = get_object_mask(img_bgr, alpha=alpha)
 
     # ── A: Edge detection (interior structural lines) ────────────────────────
     # Pass normal_path so the detector can use the geometry-only normal-map
@@ -931,12 +964,6 @@ def generate_sketch(
     # Wool texture marks drawn directly on the PIL canvas before labels.
     draw_wool_texture(pil, mid_mask, SKETCH_RGB, density=0.006)
 
-    # ── B+: Dashed segmentation-mask boundary (organic curved outline) ────────
-    boundary_top = draw_organic_dashed_boundary(
-        draw, seg_mask, SKETCH_RGB,
-        dilation=40, dash_px=18, gap_px=9, line_width=2,
-    )
-
     # ── D: Annotation ─────────────────────────────────────────────────────────
     tex_label  = (texture_type
                   .replace(" texture", "").replace(" Texture", "")
@@ -953,7 +980,6 @@ def generate_sketch(
         draw, text_lines, features,
         canvas_wh=(w, h),
         color=SKETCH_RGB,
-        boundary_top=boundary_top,
     )
     canvas = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
 

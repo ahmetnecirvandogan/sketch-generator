@@ -57,7 +57,7 @@ if not mesh_files:
 # ---------------------------------------------------------------------------
 # 2. RENDER LOOP
 # ---------------------------------------------------------------------------
-NUM_SAMPLES = 3   # Set to 1000 for a full training dataset
+NUM_SAMPLES = 5   # Set to 1000 for a full training dataset
 metadata_path = os.path.join(DATASET_DIR, "metadata.jsonl")
 
 # Load existing metadata so we preserve it when skipping frames
@@ -109,12 +109,21 @@ for i in range(NUM_SAMPLES):
     extents = bbox.extents()
     cx, cy, cz = float(center[0]), float(center[1]), float(center[2])
 
-    # DYNAMIC FRAMING: fixed front-facing camera, distance based on mesh size
-    max_extent = max(extents[0], extents[1], extents[2])
-    cam_dist   = max_extent * 1.8 + 2.0
-    cam_origin = [cx, cy, cz + cam_dist]
-    cam_target = [cx, cy, cz]
-    fov        = 40  # fixed field of view (degrees)
+    # DYNAMIC FRAMING: camera distance derived from perspective geometry so
+    # the mesh's largest dimension fills TARGET_FILL of the image height.
+    #
+    #   visible_height_at_dist = 2 * dist * tan(fov / 2)
+    #   we want: max_extent = TARGET_FILL * visible_height_at_dist
+    #   → dist = max_extent / (2 * TARGET_FILL * tan(fov / 2))
+    #
+    # This is purely proportional to the mesh size — no additive constant
+    # that would over-recede small meshes like uploads-files-3794072.
+    fov          = 40    # fixed field of view (degrees)
+    TARGET_FILL  = 0.70  # object should cover ~70 % of the image
+    max_extent   = max(float(extents[0]), float(extents[1]), float(extents[2]))
+    cam_dist     = max_extent / (2.0 * TARGET_FILL * np.tan(np.radians(fov / 2.0)))
+    cam_origin   = [cx, cy, cz + cam_dist]
+    cam_target   = [cx, cy, cz]
 
     # -----------------------------------------------------------------------
     # Randomise Lighting
@@ -260,10 +269,18 @@ for i in range(NUM_SAMPLES):
     render_np = np.array(mi.render(scene))
     print(f"  [{i+1:>3}/{NUM_SAMPLES}] Raw tensor shape: {render_np.shape}")
 
-    # ---- Save beauty render (8-bit PNG) ----
+    # ---- Save beauty render (8-bit RGBA PNG) ----
+    # The alpha channel (channel 3) is 1.0 wherever the cloth exists and 0.0
+    # for the pure-black background — independent of shading or shadow darkness.
+    # generate_sketches.py reads this alpha to build a perfect object mask so
+    # shadow areas are never incorrectly excluded from the silhouette.
     beauty_np    = np.clip(render_np[:, :, :3], 0.0, 1.0)
+    alpha_np     = np.clip(render_np[:, :, 3],  0.0, 1.0) if render_np.shape[2] >= 4 else np.ones(render_np.shape[:2], np.float32)
     beauty_uint8 = (beauty_np * 255).astype(np.uint8)
-    cv2.imwrite(render_path, cv2.cvtColor(beauty_uint8, cv2.COLOR_RGB2BGR))
+    alpha_uint8  = (alpha_np  * 255).astype(np.uint8)
+    bgr_uint8    = cv2.cvtColor(beauty_uint8, cv2.COLOR_RGB2BGR)
+    bgra_uint8   = np.dstack([bgr_uint8, alpha_uint8])
+    cv2.imwrite(render_path, bgra_uint8)
 
     # ---- Save depth map (float32 .npy — lossless, no codec needed) ----
     if render_np.shape[2] >= 5:
