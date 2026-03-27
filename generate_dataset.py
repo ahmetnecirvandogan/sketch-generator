@@ -23,6 +23,8 @@ import json
 import random
 import glob
 
+from PIL import Image, ImageDraw
+
 mi.set_variant('scalar_rgb')
 
 # ---------------------------------------------------------------------------
@@ -34,9 +36,203 @@ DATASET_DIR  = os.path.join(BASE_DIR,    "dataset")
 RENDERS_DIR  = os.path.join(DATASET_DIR, "renders")
 DEPTH_DIR    = os.path.join(DATASET_DIR, "depth")    # stores .npy float32 arrays
 NORMALS_DIR  = os.path.join(DATASET_DIR, "normals")  # stores .npy float32 arrays
+TEXTURES_DIR = os.path.join(DATASET_DIR, "textures")
 
-for d in (RENDERS_DIR, DEPTH_DIR, NORMALS_DIR, MESHES_DIR):
+for d in (RENDERS_DIR, DEPTH_DIR, NORMALS_DIR, MESHES_DIR, TEXTURES_DIR):
     os.makedirs(d, exist_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# PROCEDURAL FABRIC TEXTURE GENERATOR
+# ---------------------------------------------------------------------------
+TEXTURE_SIZE = 512
+
+def _rand_color():
+    """Random RGB colour tuple with values bright enough to be visible."""
+    return tuple(random.randint(60, 240) for _ in range(3))
+
+def _contrasting_pair():
+    """Two colours with guaranteed perceptual contrast."""
+    c1 = _rand_color()
+    c2 = _rand_color()
+    while abs(sum(c1) - sum(c2)) < 180:
+        c2 = _rand_color()
+    return c1, c2
+
+
+def generate_solid_texture(size=TEXTURE_SIZE):
+    color = _rand_color()
+    img = Image.new('RGB', (size, size), color)
+    return img, 'solid', {'color': list(color)}
+
+
+def generate_stripes_texture(size=TEXTURE_SIZE):
+    c1, c2 = _contrasting_pair()
+    orientation = random.choice(['horizontal', 'vertical', 'diagonal'])
+    stripe_w = random.randint(8, 64)
+
+    ys, xs = np.mgrid[0:size, 0:size]
+    if orientation == 'horizontal':
+        mask = (ys // stripe_w) % 2 == 1
+    elif orientation == 'vertical':
+        mask = (xs // stripe_w) % 2 == 1
+    else:
+        mask = ((xs + ys) // stripe_w) % 2 == 1
+
+    arr = np.where(mask[..., None], np.array(c2, dtype=np.uint8), np.array(c1, dtype=np.uint8))
+    img = Image.fromarray(arr)
+    return img, 'stripes', {
+        'colors': [list(c1), list(c2)],
+        'orientation': orientation, 'width': stripe_w,
+    }
+
+
+def generate_checkerboard_texture(size=TEXTURE_SIZE):
+    c1, c2 = _contrasting_pair()
+    cell = random.choice([16, 32, 48, 64])
+    ys, xs = np.mgrid[0:size, 0:size]
+    mask = ((xs // cell) + (ys // cell)) % 2 == 1
+    arr = np.where(mask[..., None], np.array(c2, dtype=np.uint8), np.array(c1, dtype=np.uint8))
+    img = Image.fromarray(arr)
+    return img, 'checkerboard', {'colors': [list(c1), list(c2)], 'cell_size': cell}
+
+
+def generate_plaid_texture(size=TEXTURE_SIZE):
+    c_base = np.array(_rand_color(), dtype=np.float32)
+    c_h = np.array(_rand_color(), dtype=np.float32)
+    c_v = np.array(_rand_color(), dtype=np.float32)
+    stripe_w = random.randint(6, 30)
+    spacing = random.randint(40, 100)
+    alpha = 0.45
+
+    arr = np.full((size, size, 3), c_base, dtype=np.float32)
+
+    ys = np.arange(size)
+    h_mask = (ys % spacing) < stripe_w
+    arr[h_mask] = arr[h_mask] * (1 - alpha) + c_h * alpha
+
+    xs = np.arange(size)
+    v_mask = (xs % spacing) < stripe_w
+    arr[:, v_mask] = arr[:, v_mask] * (1 - alpha) + c_v * alpha
+
+    img = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+    return img, 'plaid', {
+        'colors': [c_base.astype(int).tolist(), c_h.astype(int).tolist(), c_v.astype(int).tolist()],
+        'stripe_width': stripe_w, 'spacing': spacing,
+    }
+
+
+def generate_polkadot_texture(size=TEXTURE_SIZE):
+    c_bg, c_dot = _contrasting_pair()
+    dot_r = random.randint(6, 20)
+    spacing = random.randint(dot_r * 3, dot_r * 6)
+    img = Image.new('RGB', (size, size), c_bg)
+    draw = ImageDraw.Draw(img)
+
+    stagger = random.choice([0, spacing // 2])
+    for row_i, y in enumerate(range(-dot_r, size + spacing, spacing)):
+        row_offset = stagger if row_i % 2 == 1 else 0
+        for x in range(-dot_r, size + spacing, spacing):
+            draw.ellipse(
+                [x + row_offset - dot_r, y - dot_r,
+                 x + row_offset + dot_r, y + dot_r],
+                fill=c_dot,
+            )
+
+    return img, 'polkadot', {
+        'colors': [list(c_bg), list(c_dot)],
+        'dot_radius': dot_r, 'spacing': spacing,
+    }
+
+
+def generate_herringbone_texture(size=TEXTURE_SIZE):
+    c1, c2 = _contrasting_pair()
+    block_w = random.randint(8, 24)
+    block_h = block_w * 2
+
+    ys, xs = np.mgrid[0:size, 0:size]
+    bx = xs // block_w
+    lx = xs % block_w
+    ly = ys % block_h
+    thresh = ly * block_w // block_h
+    even = (bx + ys // block_h) % 2 == 0
+    mask = np.where(even, lx < thresh, lx > thresh)
+
+    arr = np.where(mask[..., None], np.array(c2, dtype=np.uint8), np.array(c1, dtype=np.uint8))
+    img = Image.fromarray(arr)
+    return img, 'herringbone', {
+        'colors': [list(c1), list(c2)], 'block_width': block_w,
+    }
+
+
+def generate_gradient_texture(size=TEXTURE_SIZE):
+    c1 = np.array(_rand_color(), dtype=np.float32)
+    c2 = np.array(_rand_color(), dtype=np.float32)
+    direction = random.choice(['horizontal', 'vertical', 'radial'])
+
+    if direction == 'horizontal':
+        t = np.linspace(0, 1, size, dtype=np.float32)
+        arr = (c1[None, :] * (1 - t[:, None]) + c2[None, :] * t[:, None])
+        arr = np.broadcast_to(arr[None, :, :], (size, size, 3)).copy()
+    elif direction == 'vertical':
+        t = np.linspace(0, 1, size, dtype=np.float32)
+        arr = (c1[None, :] * (1 - t[:, None]) + c2[None, :] * t[:, None])
+        arr = np.broadcast_to(arr[:, None, :], (size, size, 3)).copy()
+    else:
+        ys, xs = np.mgrid[0:size, 0:size]
+        cx_c, cy_c = size / 2, size / 2
+        dist = np.sqrt((xs - cx_c) ** 2 + (ys - cy_c) ** 2)
+        t = np.clip(dist / (np.sqrt(cx_c ** 2 + cy_c ** 2)), 0, 1).astype(np.float32)
+        arr = c1[None, None, :] * (1 - t[..., None]) + c2[None, None, :] * t[..., None]
+
+    img = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+    return img, 'gradient', {
+        'colors': [c1.astype(int).tolist(), c2.astype(int).tolist()], 'direction': direction,
+    }
+
+
+def generate_houndstooth_texture(size=TEXTURE_SIZE):
+    c1, c2 = _contrasting_pair()
+    cell = random.choice([16, 24, 32])
+
+    ys, xs = np.mgrid[0:size, 0:size]
+    cx_mod = xs % (cell * 2)
+    cy_mod = ys % (cell * 2)
+    in_check = (cx_mod < cell) ^ (cy_mod < cell)
+    lx = cx_mod % cell
+    ly = cy_mod % cell
+    in_tooth = (lx + ly) < cell
+    mask = in_check ^ in_tooth
+
+    arr = np.where(mask[..., None], np.array(c2, dtype=np.uint8), np.array(c1, dtype=np.uint8))
+    img = Image.fromarray(arr)
+    return img, 'houndstooth', {
+        'colors': [list(c1), list(c2)], 'cell_size': cell,
+    }
+
+
+TEXTURE_GENERATORS = [
+    generate_solid_texture,
+    generate_stripes_texture,
+    generate_checkerboard_texture,
+    generate_plaid_texture,
+    generate_polkadot_texture,
+    generate_herringbone_texture,
+    generate_gradient_texture,
+    generate_houndstooth_texture,
+]
+
+
+def generate_random_texture(frame_str: str) -> tuple:
+    """
+    Picks a random texture pattern, generates it, saves to disk, and returns
+    (texture_path, pattern_name, pattern_params).
+    """
+    gen_fn = random.choice(TEXTURE_GENERATORS)
+    img, pattern_name, params = gen_fn()
+    tex_path = os.path.join(TEXTURES_DIR, f"texture_{frame_str}.png")
+    img.save(tex_path)
+    return tex_path, pattern_name, params
 
 # Discover all .obj files in the meshes directory
 mesh_files = sorted(glob.glob(os.path.join(MESHES_DIR, "*.obj")))
@@ -126,21 +322,94 @@ for i in range(NUM_SAMPLES):
     cam_target   = [cx, cy, cz]
 
     # -----------------------------------------------------------------------
-    # Randomise Lighting
+    # Randomise Lighting — 1-10 lights with randomised type & direction
+    #
+    # Light 0 is ALWAYS a directional key light so the cloth is guaranteed
+    # to receive a minimum base illumination regardless of how point/spot
+    # lights happen to be positioned.  Remaining lights are random types.
     # -----------------------------------------------------------------------
-    lx = random.uniform(-1.0, 1.0)
-    ly = random.uniform(-0.2, 1.0)
-    lz = random.uniform(-1.0, -0.1)
+    EXTRA_LIGHT_TYPES = ['directional', 'point', 'spot']
+    num_lights = random.randint(1, 10)
+    dist_sq = cam_dist ** 2
 
-    temp_choice = random.choice(['warm', 'neutral', 'cool'])
-    if temp_choice == 'warm':    lt = [1.3, 1.0, 0.7]
-    elif temp_choice == 'cool':  lt = [0.8, 0.9, 1.3]
-    else:                        lt = [1.0, 1.0, 1.0]
+    lights_meta = []
+    lights_dict = {}
 
-    intensity = random.uniform(1.5, 6.0)
-    key_irr   = [lt[0] * intensity, lt[1] * intensity, lt[2] * intensity]
-    fill_intensity = intensity * random.uniform(0.1, 0.4)
-    fill_irr  = [fill_intensity, fill_intensity, fill_intensity]
+    def _random_temperature():
+        tc = random.choice(['warm', 'neutral', 'cool'])
+        if tc == 'warm':    return tc, [1.3, 1.0, 0.7]
+        elif tc == 'cool':  return tc, [0.8, 0.9, 1.3]
+        return tc, [1.0, 1.0, 1.0]
+
+    for li in range(num_lights):
+        light_type = 'directional' if li == 0 else random.choice(EXTRA_LIGHT_TYPES)
+        temp_choice, lt = _random_temperature()
+
+        if light_type == 'directional':
+            if li == 0:
+                key_intensity = random.uniform(2.0, 5.0)
+            else:
+                key_intensity = random.uniform(0.5, 3.0)
+            dx = random.uniform(-1.0, 1.0)
+            dy = random.uniform(-0.5, 1.0)
+            dz = random.uniform(-1.0, -0.1)
+            irr = [lt[0] * key_intensity, lt[1] * key_intensity, lt[2] * key_intensity]
+            lights_dict[f'light_{li}'] = {
+                'type': 'directional',
+                'direction': [dx, dy, dz],
+                'irradiance': {'type': 'rgb', 'value': irr},
+            }
+            lights_meta.append({
+                'type': 'directional', 'direction': [dx, dy, dz],
+                'irradiance': irr, 'temperature': temp_choice,
+            })
+
+        elif light_type == 'point':
+            px = cx + random.uniform(-max_extent, max_extent)
+            py = cy + random.uniform(max_extent * 0.3, max_extent * 2)
+            pz = cz + random.uniform(-max_extent, max_extent * 0.5)
+            base_power = random.uniform(2.0, 6.0) * dist_sq * 0.5
+            power = [lt[0] * base_power, lt[1] * base_power, lt[2] * base_power]
+            lights_dict[f'light_{li}'] = {
+                'type': 'point',
+                'position': [px, py, pz],
+                'intensity': {'type': 'rgb', 'value': power},
+            }
+            lights_meta.append({
+                'type': 'point', 'position': [px, py, pz],
+                'intensity': power, 'temperature': temp_choice,
+            })
+
+        else:  # spot — always aimed at the mesh centre
+            sx = cx + random.uniform(-max_extent * 1.5, max_extent * 1.5)
+            sy = cy + random.uniform(max_extent * 0.5, max_extent * 2.5)
+            sz = cz + random.uniform(-max_extent * 1.5, max_extent * 0.5)
+            spot_target = [
+                cx + random.uniform(-max_extent * 0.2, max_extent * 0.2),
+                cy + random.uniform(-max_extent * 0.2, max_extent * 0.2),
+                cz + random.uniform(-max_extent * 0.2, max_extent * 0.2),
+            ]
+            cutoff_angle = random.uniform(20.0, 60.0)
+            beam_width = cutoff_angle * random.uniform(0.5, 0.9)
+            base_power = random.uniform(2.0, 6.0) * dist_sq * 0.8
+            spot_power = [lt[0] * base_power, lt[1] * base_power, lt[2] * base_power]
+            lights_dict[f'light_{li}'] = {
+                'type': 'spot',
+                'to_world': mi.ScalarTransform4f.look_at(
+                    origin=[sx, sy, sz],
+                    target=spot_target,
+                    up=[0, 1, 0],
+                ),
+                'cutoff_angle': cutoff_angle,
+                'beam_width': beam_width,
+                'intensity': {'type': 'rgb', 'value': spot_power},
+            }
+            lights_meta.append({
+                'type': 'spot', 'position': [sx, sy, sz],
+                'target': spot_target,
+                'cutoff_angle': cutoff_angle, 'beam_width': beam_width,
+                'intensity': spot_power, 'temperature': temp_choice,
+            })
 
     # -----------------------------------------------------------------------
     # Randomise Mesh Rotation
@@ -160,21 +429,126 @@ for i in range(NUM_SAMPLES):
     mesh_transform_matrix = mesh_transform.matrix.numpy().tolist()
 
     # -----------------------------------------------------------------------
-    # Randomise Material
+    # Randomise Material + Texture
+    #
+    # Each fabric type defines a physically-coherent range for every
+    # principled BSDF parameter.  One preset is picked at random per frame
+    # and each parameter is jittered within its range for variety.
     # -----------------------------------------------------------------------
-    roughness  = random.uniform(0.1, 0.9)
-    r, g, b    = (random.uniform(0.1, 0.9) for _ in range(3))
-    sheen      = random.uniform(0.0, 1.0)
-    sheen_tint = random.uniform(0.0, 1.0)
-    anisotropic= random.uniform(0.0, 0.8)
-    specular   = random.uniform(0.0, 1.0)
+    FABRIC_PRESETS = {
+        'silk': {
+            'roughness':   (0.08, 0.25), 'specular':    (0.6, 1.0),
+            'sheen':       (0.5,  0.9),  'sheen_tint':  (0.3, 0.7),
+            'anisotropic': (0.3,  0.7),  'spec_trans':  (0.0, 0.05),
+            'clearcoat':   (0.0,  0.1),
+        },
+        'satin': {
+            'roughness':   (0.05, 0.15), 'specular':    (0.7, 1.0),
+            'sheen':       (0.3,  0.6),  'sheen_tint':  (0.2, 0.5),
+            'anisotropic': (0.4,  0.8),  'spec_trans':  (0.0, 0.0),
+            'clearcoat':   (0.05, 0.2),
+        },
+        'wool': {
+            'roughness':   (0.6,  0.95), 'specular':    (0.05, 0.3),
+            'sheen':       (0.5,  1.0),  'sheen_tint':  (0.5, 1.0),
+            'anisotropic': (0.0,  0.15), 'spec_trans':  (0.0, 0.0),
+            'clearcoat':   (0.0,  0.0),
+        },
+        'cotton': {
+            'roughness':   (0.5,  0.8),  'specular':    (0.1, 0.35),
+            'sheen':       (0.2,  0.5),  'sheen_tint':  (0.3, 0.6),
+            'anisotropic': (0.0,  0.1),  'spec_trans':  (0.0, 0.0),
+            'clearcoat':   (0.0,  0.0),
+        },
+        'velvet': {
+            'roughness':   (0.55, 0.85), 'specular':    (0.1, 0.3),
+            'sheen':       (0.8,  1.0),  'sheen_tint':  (0.7, 1.0),
+            'anisotropic': (0.0,  0.1),  'spec_trans':  (0.0, 0.0),
+            'clearcoat':   (0.0,  0.05),
+        },
+        'linen': {
+            'roughness':   (0.6,  0.9),  'specular':    (0.05, 0.2),
+            'sheen':       (0.1,  0.3),  'sheen_tint':  (0.2, 0.5),
+            'anisotropic': (0.05, 0.2),  'spec_trans':  (0.0, 0.0),
+            'clearcoat':   (0.0,  0.0),
+        },
+        'denim': {
+            'roughness':   (0.7,  0.95), 'specular':    (0.05, 0.2),
+            'sheen':       (0.1,  0.3),  'sheen_tint':  (0.4, 0.8),
+            'anisotropic': (0.1,  0.3),  'spec_trans':  (0.0, 0.0),
+            'clearcoat':   (0.0,  0.0),
+        },
+        'chiffon': {
+            'roughness':   (0.15, 0.35), 'specular':    (0.3, 0.6),
+            'sheen':       (0.1,  0.3),  'sheen_tint':  (0.1, 0.3),
+            'anisotropic': (0.0,  0.1),  'spec_trans':  (0.2, 0.5),
+            'clearcoat':   (0.0,  0.0),
+        },
+        'cashmere': {
+            'roughness':   (0.5,  0.75), 'specular':    (0.15, 0.4),
+            'sheen':       (0.6,  0.9),  'sheen_tint':  (0.5, 0.8),
+            'anisotropic': (0.0,  0.1),  'spec_trans':  (0.0, 0.0),
+            'clearcoat':   (0.0,  0.0),
+        },
+        'leather': {
+            'roughness':   (0.3,  0.6),  'specular':    (0.3, 0.7),
+            'sheen':       (0.0,  0.15), 'sheen_tint':  (0.0, 0.3),
+            'anisotropic': (0.0,  0.1),  'spec_trans':  (0.0, 0.0),
+            'clearcoat':   (0.15, 0.5),
+        },
+    }
 
-    material_desc = "shiny silk" if roughness < 0.4 else "matte wool"
-    texture_type = "Coarse Wool texture" if "wool" in material_desc else "Silk texture"
-    keyword = "wool pattern" if "wool" in material_desc else "silk pattern"
+    material_desc = random.choice(list(FABRIC_PRESETS.keys()))
+    preset = FABRIC_PRESETS[material_desc]
+
+    def _sample(key):
+        lo, hi = preset[key]
+        return random.uniform(lo, hi)
+
+    roughness   = _sample('roughness')
+    specular    = _sample('specular')
+    sheen       = _sample('sheen')
+    sheen_tint  = _sample('sheen_tint')
+    anisotropic = _sample('anisotropic')
+    spec_trans  = _sample('spec_trans')
+    clearcoat   = _sample('clearcoat')
+
+    texture_type = f"{material_desc.capitalize()} texture"
+    keyword = f"{material_desc} pattern"
+
+    tex_path, pattern_name, pattern_params = generate_random_texture(frame_str)
+
+    # Analyse mesh UV range to choose a tiling factor that makes the pattern
+    # repeat at a visually sensible scale regardless of how the OBJ was UV-unwrapped.
+    uv_u_range, uv_v_range = 1.0, 1.0
+    try:
+        with open(current_mesh_path) as _mf:
+            _us, _vs = [], []
+            for _line in _mf:
+                if _line.startswith('vt '):
+                    _parts = _line.split()
+                    _us.append(float(_parts[1]))
+                    _vs.append(float(_parts[2]))
+            if _us:
+                uv_u_range = max(_us) - min(_us)
+                uv_v_range = max(_vs) - min(_vs)
+    except Exception:
+        pass
+
+    desired_repeats = random.uniform(3.0, 6.0)
+    tile_u = desired_repeats / max(uv_u_range, 0.01)
+    tile_v = desired_repeats / max(uv_v_range, 0.01)
+
+    base_color_spec = {
+        'type': 'bitmap',
+        'filename': tex_path,
+        'wrap_mode': 'repeat',
+        'to_uv': mi.ScalarTransform3f.scale([tile_u, tile_v]),
+    }
+
     prompt = (
-        f"a photorealistic 3D render of a {material_desc} cloth, "
-        "physical rendering, detailed fabric folds"
+        f"a photorealistic 3D render of a {material_desc} cloth with "
+        f"{pattern_name} pattern, physical rendering, detailed fabric folds"
     )
 
     # -----------------------------------------------------------------------
@@ -188,14 +562,11 @@ for i in range(NUM_SAMPLES):
     # This gives the Neural Contours Image Translation Branch everything it
     # needs for the view-dependent shape representation without extra renders.
     # -----------------------------------------------------------------------
-    scene = mi.load_dict({
+    scene_dict = {
         'type': 'scene',
 
         'integrator': {
             'type': 'aov',
-            # Format: "<output_name>:<aov_type>"
-            # depth    → floating-point distance in scene units
-            # sh_normal → shading-space normal vector (X, Y, Z)
             'aovs': 'depth:depth,normals:sh_normal',
             'my_path': {
                 'type': 'path',
@@ -215,10 +586,6 @@ for i in range(NUM_SAMPLES):
                 'type': 'hdrfilm',
                 'width':  512,
                 'height': 512,
-                # rgba  = 4 channels (beauty + alpha)
-                # + 1 depth  channel
-                # + 3 normal channels
-                # Total = 8 channels → use 'rgba' base + AOV extras
                 'pixel_format': 'rgba',
             },
             'sampler': {
@@ -227,47 +594,74 @@ for i in range(NUM_SAMPLES):
             },
         },
 
-        # Key light
-        'key_light': {
-            'type': 'directional',
-            'direction': [lx, ly, lz],
-            'irradiance': {'type': 'rgb', 'value': key_irr},
-        },
-
-        # Fill light — opposite direction, dimmer
-        'fill_light': {
-            'type': 'directional',
-            'direction': [-lx, ly, -lz],
-            'irradiance': {'type': 'rgb', 'value': fill_irr},
-        },
-
         'cloth_object': {
             'type': 'obj',
             'filename': current_mesh_path,
             'to_world': mesh_transform,
             'bsdf': {
                 'type': 'principled',
-                'base_color':  {'type': 'rgb', 'value': [r, g, b]},
+                'base_color':  base_color_spec,
                 'roughness':   roughness,
+                'specular':    specular,
                 'sheen':       sheen,
                 'sheen_tint':  sheen_tint,
                 'anisotropic': anisotropic,
-                'specular':    specular,
+                'spec_trans':  spec_trans,
+                'clearcoat':   clearcoat,
             },
         },
-    })
+    }
+
+    scene_dict.update(lights_dict)
 
     # -----------------------------------------------------------------------
-    # Render → multi-channel NumPy tensor (H, W, C)
+    # Render with brightness guarantee
     #
-    # Expected channel layout from the AOV integrator:
-    #   [0..2]  RGB beauty (from the 'path' sub-integrator)
-    #   [3]     Alpha
-    #   [4]     Depth         (depth:depth)
-    #   [5..7]  Normals XYZ   (normals:sh_normal)
+    # After the first render we check the mean luminance of object pixels
+    # (alpha > 0).  If it falls below MIN_BRIGHTNESS the cloth is not
+    # visually readable, so we inject a rescue directional light aimed
+    # straight at the camera target and re-render.  Up to MAX_RETRIES
+    # attempts; each retry doubles the rescue light intensity.
     # -----------------------------------------------------------------------
-    render_np = np.array(mi.render(scene))
-    print(f"  [{i+1:>3}/{NUM_SAMPLES}] Raw tensor shape: {render_np.shape}")
+    MIN_BRIGHTNESS = 0.08   # minimum mean luminance (0-1 float scale)
+    MAX_RETRIES    = 3
+    rescue_boost   = 0
+
+    for attempt in range(1 + MAX_RETRIES):
+        scene = mi.load_dict(scene_dict)
+        render_np = np.array(mi.render(scene))
+
+        beauty_tmp = np.clip(render_np[:, :, :3], 0.0, 1.0)
+        alpha_tmp  = render_np[:, :, 3] if render_np.shape[2] >= 4 else np.ones(render_np.shape[:2])
+        obj_pixels = beauty_tmp[alpha_tmp > 0.5]
+
+        if obj_pixels.size == 0:
+            mean_lum = 0.0
+        else:
+            mean_lum = float(np.mean(obj_pixels[:, 0] * 0.2126
+                                     + obj_pixels[:, 1] * 0.7152
+                                     + obj_pixels[:, 2] * 0.0722))
+
+        if mean_lum >= MIN_BRIGHTNESS:
+            break
+
+        rescue_boost += 1
+        rescue_int = 3.0 * (2 ** rescue_boost)
+        rescue_key = f'rescue_light_{rescue_boost}'
+        scene_dict[rescue_key] = {
+            'type': 'directional',
+            'direction': [0.0, -0.3, -1.0],
+            'irradiance': {'type': 'rgb', 'value': [rescue_int, rescue_int, rescue_int]},
+        }
+        lights_meta.append({
+            'type': 'directional', 'direction': [0.0, -0.3, -1.0],
+            'irradiance': [rescue_int, rescue_int, rescue_int],
+            'temperature': 'neutral', 'rescue': True,
+        })
+        print(f"  [{i+1:>3}/{NUM_SAMPLES}] Brightness {mean_lum:.3f} < {MIN_BRIGHTNESS} — "
+              f"adding rescue light (attempt {rescue_boost}, intensity {rescue_int:.1f})")
+
+    print(f"  [{i+1:>3}/{NUM_SAMPLES}] Raw tensor shape: {render_np.shape} | brightness: {mean_lum:.3f}")
 
     # ---- Save beauty render (8-bit RGBA PNG) ----
     # The alpha channel (channel 3) is 1.0 wherever the cloth exists and 0.0
@@ -316,7 +710,7 @@ for i in range(NUM_SAMPLES):
         "depth_image":        f"depth/depth_{frame_str}.npy",
         "normals_image":      f"normals/normals_{frame_str}.npy",
         "conditioning_image": f"conditioning/conditioning_{frame_str}.png",
-        "text":               f"Wool Scarf, {texture_type}, {prompt}",
+        "text":               f"Cloth Scarf, {texture_type}, {prompt}",
         "keyword":             keyword,
         "texture_type":        texture_type,
         "mesh_file":          os.path.relpath(current_mesh_path, DATASET_DIR),
@@ -326,11 +720,33 @@ for i in range(NUM_SAMPLES):
         "fov_deg":            fov,
         # 4×4 row-major matrix as a list-of-lists (JSON serialisable)
         "mesh_transform":     mesh_transform_matrix,
+        # ── Lighting configuration ──
+        "num_lights":         num_lights,
+        "lights":             lights_meta,
+        # ── Material properties ──
+        "material_type":      material_desc,
+        "material_props": {
+            "roughness":   round(roughness,   4),
+            "specular":    round(specular,     4),
+            "sheen":       round(sheen,        4),
+            "sheen_tint":  round(sheen_tint,   4),
+            "anisotropic": round(anisotropic,  4),
+            "spec_trans":  round(spec_trans,   4),
+            "clearcoat":   round(clearcoat,    4),
+        },
+        # ── Texture / pattern ──
+        "texture_pattern":    pattern_name,
+        "texture_params":     pattern_params,
+        "texture_file":       f"textures/texture_{frame_str}.png",
+        "texture_tiling":     [tile_u, tile_v],
     })
 
+    light_types_str = ', '.join(lm['type'] for lm in lights_meta)
     print(
         f"  [{i+1:>3}/{NUM_SAMPLES}] Saved {frame_str} "
-        f"| Mesh: {mesh_name[:20]} | {material_desc}"
+        f"| Mesh: {mesh_name[:20]} | {material_desc:9s} "
+        f"| {num_lights} light(s): [{light_types_str}] "
+        f"| texture: {pattern_name}"
     )
 
 # ---------------------------------------------------------------------------
