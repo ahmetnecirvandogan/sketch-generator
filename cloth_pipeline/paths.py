@@ -10,13 +10,15 @@ DATASET_DIR = os.path.join(BASE_DIR, "dataset")
 RENDERS_DIR = os.path.join(DATASET_DIR, "renders")
 DEPTH_DIR = os.path.join(DATASET_DIR, "depth")
 NORMALS_DIR = os.path.join(DATASET_DIR, "normals")
-TEXTURES_DIR = os.path.join(DATASET_DIR, "textures")
+# Procedural albedo / pattern maps (Mitsuba base_color). Folder name is historical.
+ALBEDO_MAPS_DIR = os.path.join(DATASET_DIR, "textures")
+TEXTURES_DIR = ALBEDO_MAPS_DIR  # deprecated alias — same path as ALBEDO_MAPS_DIR
 CONDITION_DIR = os.path.join(DATASET_DIR, "conditioning")
 METADATA_PATH = os.path.join(DATASET_DIR, "metadata.jsonl")
 
 
 def ensure_dataset_stage_dirs() -> None:
-    for d in (RENDERS_DIR, DEPTH_DIR, NORMALS_DIR, MESHES_DIR, TEXTURES_DIR):
+    for d in (RENDERS_DIR, DEPTH_DIR, NORMALS_DIR, MESHES_DIR, ALBEDO_MAPS_DIR):
         os.makedirs(d, exist_ok=True)
 
 

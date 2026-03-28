@@ -3,7 +3,7 @@ generate_dataset.py
 -------------------
 Stage 1 of the Neural-Contours-Cloth ControlNet dataset pipeline.
 
-Implementation lives in ``cloth_pipeline.dataset`` (paths, procedural textures,
+Implementation lives in ``cloth_pipeline.dataset`` (paths, procedural albedo maps,
 Mitsuba render loop). Run this file from the project root as before:
 
   python generate_dataset.py

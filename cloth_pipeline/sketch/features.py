@@ -1,4 +1,4 @@
-"""Highlight / texture / shadow feature points and dominant colour name."""
+"""Highlight / mid-tone / shadow feature points and dominant colour name."""
 
 import cv2
 import numpy as np
@@ -8,20 +8,20 @@ def find_feature_points(
     seg_mask: np.ndarray,
 ) -> dict:
     """
-    Returns a dict with keys 'highlight', 'texture', 'shadow' → (x, y) or None.
+    Returns a dict with keys 'highlight', 'midtone', 'shadow' → (x, y) or None.
 
     • highlight — centroid of the LARGEST connected region above the 90th
                   brightness percentile.  The largest-component filter prevents
                   scattered fringe tips (which are individually bright) from
                   pulling the centroid away from the main body highlight.
-    • texture   — centroid of pixels in the 40th–60th brightness percentile
+    • midtone   — centroid of pixels in the 40th–60th brightness percentile
     • shadow    — raw centroid (will be overridden in generate_sketch with the
                   centroid of the hatching-filtered shadow mask)
     """
     gray   = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     pixels = gray[seg_mask > 0]
     if len(pixels) == 0:
-        return {"highlight": None, "texture": None, "shadow": None}
+        return {"highlight": None, "midtone": None, "shadow": None}
 
     p20 = float(np.percentile(pixels, 20))
     p40 = float(np.percentile(pixels, 40))
@@ -51,7 +51,7 @@ def find_feature_points(
 
     return {
         "highlight": _centroid(_largest_component(_masked(p90, 255))),
-        "texture":   _centroid(_masked(p40, p60)),
+        "midtone":   _centroid(_masked(p40, p60)),
         "shadow":    _centroid(_masked(0,   p20)),   # overridden in generate_sketch
     }
 

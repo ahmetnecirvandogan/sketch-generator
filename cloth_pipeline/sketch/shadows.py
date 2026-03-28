@@ -25,8 +25,35 @@ def compute_shadow_mask(
     shadow = ((gray <= thresh).astype(np.uint8) * 255)
     shadow = cv2.bitwise_and(shadow, seg_mask)
     shadow = cv2.morphologyEx(shadow, cv2.MORPH_OPEN,  np.ones((3, 3), np.uint8))
-    shadow = cv2.morphologyEx(shadow, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
+    # 5×5 close links nearby shadow without swallowing the whole garment when
+    # luminance is compressed (e.g. translucent chiffon, narrow histogram).
+    shadow = cv2.morphologyEx(shadow, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
     return shadow
+
+
+def shadow_mask_darkest_fraction(
+    img_bgr: np.ndarray,
+    seg_mask: np.ndarray,
+    fraction: float,
+) -> np.ndarray:
+    """
+    Marks exactly the ``fraction`` darkest object pixels (stable sort), then
+    applies a light open/close.  Use when percentile thresholds tie across most
+    of the cloth and would otherwise hatch nearly the entire silhouette.
+    """
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    ys, xs = np.where(seg_mask > 0)
+    if ys.size == 0:
+        return np.zeros_like(gray, dtype=np.uint8)
+    vals = gray[ys, xs]
+    n = int(vals.size)
+    k = max(1, min(n, int(round(n * fraction))))
+    order = np.argsort(vals, kind="stable")
+    out = np.zeros_like(gray, dtype=np.uint8)
+    out[ys[order[:k]], xs[order[:k]]] = 255
+    out = cv2.morphologyEx(out, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    out = cv2.morphologyEx(out, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    return out
 
 
 def draw_hatching(
