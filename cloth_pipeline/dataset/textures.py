@@ -1,4 +1,9 @@
-"""Procedural fabric bitmaps saved under dataset/textures/."""
+"""Procedural albedo (surface pattern) maps saved under ``dataset/textures/``.
+
+These PNGs are *not* BRDF material presets (roughness, sheen, etc.); those live
+in ``material_type`` / ``material_props`` in dataset metadata. Here we only
+generate repeating colour patterns for Mitsuba ``base_color``.
+"""
 
 import os
 import random
@@ -6,7 +11,7 @@ import random
 import numpy as np
 from PIL import Image, ImageDraw
 
-from cloth_pipeline.paths import TEXTURES_DIR
+from cloth_pipeline.paths import ALBEDO_MAPS_DIR
 
 TEXTURE_SIZE = 512
 
@@ -182,7 +187,7 @@ def generate_houndstooth_texture(size=TEXTURE_SIZE):
     return img, "houndstooth", {"colors": [list(c1), list(c2)], "cell_size": cell}
 
 
-TEXTURE_GENERATORS = [
+PATTERN_GENERATORS = [
     generate_solid_texture,
     generate_stripes_texture,
     generate_checkerboard_texture,
@@ -194,9 +199,10 @@ TEXTURE_GENERATORS = [
 ]
 
 
-def generate_random_texture(frame_str: str) -> tuple:
-    gen_fn = random.choice(TEXTURE_GENERATORS)
+def generate_random_albedo_map(frame_str: str) -> tuple:
+    """Pick a procedural pattern, save ``texture_<frame>.png``, return path + metadata."""
+    gen_fn = random.choice(PATTERN_GENERATORS)
     img, pattern_name, params = gen_fn()
-    tex_path = os.path.join(TEXTURES_DIR, f"texture_{frame_str}.png")
-    img.save(tex_path)
-    return tex_path, pattern_name, params
+    out_path = os.path.join(ALBEDO_MAPS_DIR, f"texture_{frame_str}.png")
+    img.save(out_path)
+    return out_path, pattern_name, params

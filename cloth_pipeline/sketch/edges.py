@@ -61,7 +61,7 @@ def detect_edges(
       1. HED neural edge detector (if model files present)
       2. Normal-map gradient (if a .npy file is given and exists) — detects
          only geometric fold edges by measuring how rapidly the surface normal
-         changes direction.  Wool fibre texture has near-zero normal gradient
+         changes direction.  Fine fibre detail has near-zero normal gradient
          so it is completely invisible to this detector.
       3. Bilateral-filtered Canny fallback on the RGB render (d=15 to
          aggressively suppress micro-texture before Canny).
@@ -120,7 +120,7 @@ def detect_edges(
     else:
         gray     = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
         # d=15, sigmaColor=80: more aggressive than before to wipe out the
-        # fine wool fibre texture that was causing chaotic scratch noise.
+        # fine fibre detail in the RGB render that caused chaotic scratch noise.
         filtered = cv2.bilateralFilter(gray, d=15, sigmaColor=80, sigmaSpace=80)
         v        = float(np.median(filtered[filtered > 0])) if np.any(filtered > 0) else 128.0
         edges    = cv2.Canny(filtered,

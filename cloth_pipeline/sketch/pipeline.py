@@ -1,5 +1,7 @@
 """Render → conditioning sketch (edges, silhouette, hatching, labels)."""
 
+from __future__ import annotations
+
 import os
 
 import cv2
@@ -9,23 +11,43 @@ from PIL import Image, ImageDraw
 from cloth_pipeline.paths import DATASET_DIR
 from cloth_pipeline.sketch.constants import SKETCH_BGR, SKETCH_RGB
 from cloth_pipeline.sketch.drawing import (
+    albedo_pattern_stroke_mask,
     draw_annotations,
     draw_wobbly_contour,
-    draw_wool_texture,
+    measure_top_left_text_pad,
 )
 from cloth_pipeline.sketch.edges import detect_edges
 from cloth_pipeline.sketch.features import detect_dominant_color, find_feature_points
 from cloth_pipeline.sketch.segmentation import get_object_mask
-from cloth_pipeline.sketch.shadows import compute_shadow_mask, draw_hatching
+from cloth_pipeline.sketch.shadows import (
+    compute_shadow_mask,
+    draw_hatching,
+    shadow_mask_darkest_fraction,
+)
 
 def generate_sketch(
-    render_path:  str,
-    obj_name:     str,
-    texture_type: str,
-    keyword:      str,
+    render_path:    str,
+    obj_name:       str,
+    material_label: str,
+    keyword:        str,
+    *,
+    albedo_map_path: str | None = None,
+    albedo_tiling:   tuple[float, float] | None = None,
+    pattern_name:    str | None = None,
 ) -> np.ndarray:
     """
-    Full four-step pipeline.
+    Full render → conditioning sketch pipeline.
+
+    When ``albedo_map_path`` / ``albedo_tiling`` / ``pattern_name`` are set (from
+    dataset metadata), the same procedural albedo PNG used for Mitsuba ``base_color``
+    is tiled and converted to sparse in-mask strokes so pattern is separate from
+    lighting-dependent structure in the RGB render.
+
+    Fabric preset is written in the top-left text block (``material_label``), not
+    as strokes on the cloth. The output canvas adds equal padding on opposite sides
+    (right = left, bottom = top) so the ``w×h`` sketch stays **centred** like the
+    source render, while the top-left quadrant stays clear for captions.
+
     Returns a BGR uint8 image ready for cv2.imwrite.
     """
     # Load as BGRA so we can extract the alpha channel saved by generate_dataset.
@@ -63,7 +85,7 @@ def generate_sketch(
 
     # ── A: Edge detection (interior structural lines) ────────────────────────
     # Pass normal_path so the detector can use the geometry-only normal-map
-    # gradient when the .npy file exists, skipping wool micro-texture noise.
+    # gradient when the .npy file exists, skipping fine micro-fibre noise in RGB.
     edges = detect_edges(img_bgr, seg_mask=seg_mask, normal_path=normal_path)
     # HED / normal / Canny all fire strongly on the object rim; those pixels stack
     # with the wobbly silhouette and read as a fat outer edge.  Keep structural
@@ -72,6 +94,21 @@ def generate_sketch(
     interior_for_edges = cv2.erode(seg_mask, _k, iterations=1)
     edges = cv2.bitwise_and(edges, interior_for_edges)
     canvas[edges > 0] = SKETCH_BGR
+
+    # ── A−: Albedo pattern from the same bitmap used as Mitsuba base_color ─────
+    # Tied to material / pattern identity; not view- or lighting-dependent.
+    albedo_pat = None
+    if albedo_map_path and os.path.isfile(albedo_map_path):
+        tex_bgr = cv2.imread(albedo_map_path, cv2.IMREAD_COLOR)
+        if tex_bgr is not None:
+            tu, tv = 4.0, 4.0
+            if albedo_tiling is not None and len(albedo_tiling) >= 2:
+                tu = float(albedo_tiling[0])
+                tv = float(albedo_tiling[1])
+            albedo_pat = albedo_pattern_stroke_mask(
+                tex_bgr, h, w, tu, tv, interior_for_edges, pattern_name
+            )
+            canvas[albedo_pat > 0] = SKETCH_BGR
 
     # ── A+: Wobbly outer silhouette from segmentation mask contour ───────────
     # CHAIN_APPROX_NONE → full boundary; draw_wobbly_contour resamples to one
@@ -96,6 +133,32 @@ def generate_sketch(
         biggest    = 1 + int(np.argmax(stats_comp[1:, cv2.CC_STAT_AREA]))
         shadow_mask = ((lbl_comp == biggest).astype(np.uint8) * 255)
 
+    # When luminance is almost flat (common on translucent / even-lit fabrics),
+    # the percentile threshold ties across most pixels and morph close merges
+    # into one giant region — hatching then reads as a solid fill.  Fall back
+    # to a fixed darkest fraction of object pixels (same intent as ~18%).
+    _obj_area = int(np.count_nonzero(seg_mask > 0))
+    _sh_area  = int(np.count_nonzero(shadow_mask > 0))
+    _max_frac = 0.44
+    if _obj_area > 0 and _sh_area > _max_frac * _obj_area:
+        shadow_mask = shadow_mask_darkest_fraction(img_bgr, seg_mask, 0.18)
+        n_comp, lbl_comp, stats_comp, _ = cv2.connectedComponentsWithStats(
+            shadow_mask
+        )
+        if n_comp > 1:
+            biggest = 1 + int(np.argmax(stats_comp[1:, cv2.CC_STAT_AREA]))
+            shadow_mask = ((lbl_comp == biggest).astype(np.uint8) * 255)
+        _sh_area = int(np.count_nonzero(shadow_mask > 0))
+        # If the ranked mask still exploded (ties after close), hard-cap by eroding.
+        _erk = np.ones((3, 3), np.uint8)
+        _cap = max(int(_obj_area * _max_frac), 1)
+        while _sh_area > _cap:
+            prev = _sh_area
+            shadow_mask = cv2.erode(shadow_mask, _erk, iterations=1)
+            _sh_area = int(np.count_nonzero(shadow_mask > 0))
+            if _sh_area == prev or _sh_area == 0:
+                break
+
     # Override shadow centroid now (before any mask manipulation below).
     shad_ys, shad_xs = np.where(shadow_mask > 0)
 
@@ -119,41 +182,49 @@ def generate_sketch(
     if len(shad_ys) > 0:
         features["shadow"] = (int(np.mean(shad_xs)), int(np.mean(shad_ys)))
 
-    # ── Mid-tone wool texture stippling (dots + squiggles) ───────────────────
-    gray_img      = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-    obj_pixels    = gray_img[seg_mask > 0]
-    if obj_pixels.size > 0:
-        lo_pct = float(np.percentile(obj_pixels, 35))
-        hi_pct = float(np.percentile(obj_pixels, 70))
-        mid_mask = (
-            (gray_img >= lo_pct) & (gray_img <= hi_pct) & (seg_mask > 0)
-        ).astype(np.uint8) * 255
-    else:
-        mid_mask = np.zeros_like(seg_mask)
-
-    # Convert to PIL early so we can draw vector annotations on the same surface.
-    pil  = Image.fromarray(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
-    draw = ImageDraw.Draw(pil)
-
-    # Wool texture marks drawn directly on the PIL canvas before labels.
-    draw_wool_texture(pil, mid_mask, SKETCH_RGB, density=0.006)
-
-    # ── D: Annotation ─────────────────────────────────────────────────────────
-    tex_label  = (texture_type
-                  .replace(" texture", "").replace(" Texture", "")
-                  .replace("Coarse ", "").replace("coarse ", "")
-                  .strip())
+    # ── D: Annotation + reserved top-left band ───────────────────────────────
+    mat_display = (
+        material_label.replace(" texture", "").replace(" Texture", "")
+        .replace("Coarse ", "").replace("coarse ", "")
+        .strip()
+    )
     short_name = obj_name.replace("Wool ", "").replace("wool ", "")
     text_lines = [
-        f"Text: {short_name} ({dominant_color})",
-        f"Texture: {tex_label}",
+        f"Material: {mat_display}",
+        f"Object: {short_name} ({dominant_color})",
         f"Key word: {keyword}",
     ]
+    pad_left, pad_top = measure_top_left_text_pad(text_lines)
+    # Mirror padding so the render-sized sketch block stays canvas-centred
+    # (pixel layout inside the block still matches the Mitsuba frame 1:1).
+    pad_right = pad_left
+    pad_bottom = pad_top
+    out_w = pad_left + w + pad_right
+    out_h = pad_top + h + pad_bottom
+    full = np.full((out_h, out_w, 3), 255, dtype=np.uint8)
+    full[pad_top : pad_top + h, pad_left : pad_left + w] = canvas
+
+    def _shift(pt: tuple[int, int] | None) -> tuple[int, int] | None:
+        if pt is None:
+            return None
+        return (int(pt[0] + pad_left), int(pt[1] + pad_top))
+
+    features_draw = {
+        "highlight": _shift(features.get("highlight")),
+        "midtone": _shift(features.get("midtone")),
+        "shadow": _shift(features.get("shadow")),
+    }
+
+    pil = Image.fromarray(cv2.cvtColor(full, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(pil)
 
     draw_annotations(
-        draw, text_lines, features,
-        canvas_wh=(w, h),
+        draw,
+        text_lines,
+        features_draw,
+        canvas_wh=(out_w, out_h),
         color=SKETCH_RGB,
+        sketch_content_top=pad_top,
     )
     canvas = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
 

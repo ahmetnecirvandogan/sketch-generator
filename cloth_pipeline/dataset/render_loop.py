@@ -9,7 +9,7 @@ import cv2
 import mitsuba as mi
 import numpy as np
 
-from cloth_pipeline.dataset.textures import generate_random_texture
+from cloth_pipeline.dataset.textures import generate_random_albedo_map
 from cloth_pipeline.paths import (
     DATASET_DIR,
     DEPTH_DIR,
@@ -213,7 +213,7 @@ def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
         mesh_transform_matrix = mesh_transform.matrix.numpy().tolist()
 
         # -----------------------------------------------------------------------
-        # Randomise Material + Texture
+        # Randomise BRDF material preset + procedural albedo pattern
         #
         # Each fabric type defines a physically-coherent range for every
         # principled BSDF parameter.  One preset is picked at random per frame
@@ -297,10 +297,9 @@ def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
         spec_trans  = _sample('spec_trans')
         clearcoat   = _sample('clearcoat')
 
-        texture_type = f"{material_desc.capitalize()} texture"
         keyword = f"{material_desc} pattern"
 
-        tex_path, pattern_name, pattern_params = generate_random_texture(frame_str)
+        tex_path, pattern_name, pattern_params = generate_random_albedo_map(frame_str)
 
         # Analyse mesh UV range to choose a tiling factor that makes the pattern
         # repeat at a visually sensible scale regardless of how the OBJ was UV-unwrapped.
@@ -494,9 +493,8 @@ def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
             "depth_image":        f"depth/depth_{frame_str}.npy",
             "normals_image":      f"normals/normals_{frame_str}.npy",
             "conditioning_image": f"conditioning/conditioning_{frame_str}.png",
-            "text":               f"Cloth Scarf, {texture_type}, {prompt}",
+            "text":               f"Cloth Scarf, {material_desc} material, {prompt}",
             "keyword":             keyword,
-            "texture_type":        texture_type,
             "mesh_file":          os.path.relpath(current_mesh_path, DATASET_DIR),
             # ── Camera parameters (Neural Contours Geometry Branch) ──
             "cam_origin":         cam_origin,
@@ -518,11 +516,11 @@ def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
                 "spec_trans":  round(spec_trans,   4),
                 "clearcoat":   round(clearcoat,    4),
             },
-            # ── Texture / pattern ──
-            "texture_pattern":    pattern_name,
-            "texture_params":     pattern_params,
-            "texture_file":       f"textures/texture_{frame_str}.png",
-            "texture_tiling":     [tile_u, tile_v],
+            # ── Procedural albedo map (surface pattern, not BRDF material) ──
+            "pattern_name":       pattern_name,
+            "pattern_params":     pattern_params,
+            "albedo_map":         f"textures/texture_{frame_str}.png",
+            "albedo_tiling":      [tile_u, tile_v],
         })
 
         light_types_str = ', '.join(lm['type'] for lm in lights_meta)
@@ -530,7 +528,7 @@ def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
             f"  [{i+1:>3}/{num_samples}] Saved {frame_str} "
             f"| Mesh: {mesh_name[:20]} | {material_desc:9s} "
             f"| {num_lights} light(s): [{light_types_str}] "
-            f"| texture: {pattern_name}"
+            f"| pattern: {pattern_name}"
         )
 
     # ---------------------------------------------------------------------------

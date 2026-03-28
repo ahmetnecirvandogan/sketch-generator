@@ -1,7 +1,10 @@
-"""Wobbly contours, wool stippling, arrows, and text annotations."""
+"""Wobbly contours, material-specific mid-tone marks, arrows, and text."""
+
+from __future__ import annotations
 
 import math
 import random
+from typing import Optional
 
 import cv2
 import numpy as np
@@ -151,39 +154,346 @@ def draw_wobbly_contour(
         )
 
 
-def draw_wool_texture(
-    pil_img:  Image.Image,
-    mid_mask: np.ndarray,
-    color:    tuple,
-    density:  float = 0.006,
-) -> None:
-    """
-    Scatters tiny dots and short squiggles across the *mid_mask* region to
-    indicate wool texture.  The marks are deliberately sparse so they read
-    as a texture hint rather than a tone fill.
+# Canonical fabric ids — keep in sync with FABRIC_PRESETS in render_loop.py
+_MATERIAL_IDS = frozenset({
+    "silk", "satin", "wool", "cotton", "velvet", "linen", "denim",
+    "chiffon", "cashmere", "leather",
+})
 
-    • ~55 % probability → small filled dot (radius 1–2 px)
-    • ~45 % probability → 3-point squiggle line (mimics a loose loop stroke)
+
+def normalize_material_type(
+    material_type: Optional[str],
+    material_label: str,
+) -> str:
     """
-    draw = ImageDraw.Draw(pil_img)
+    Map metadata ``material_type`` (preferred) or a human ``material_label``
+    to a fabric id for mark vocabulary. Unknown → ``\"default\"``.
+    """
+    if material_type:
+        k = str(material_type).strip().lower()
+        if k in _MATERIAL_IDS:
+            return k
+    t = (material_label or "").strip().lower()
+    t = t.replace(" texture", "").replace(" material", "")
+    for name in sorted(_MATERIAL_IDS, key=len, reverse=True):
+        if name in t:
+            return name
+    return "default"
+
+
+def _mid_mask_sample_sites(mid_mask: np.ndarray, density: float, cap: int):
     ys, xs = np.where(mid_mask > 0)
     if len(ys) == 0:
-        return
-    n_marks = min(int(len(ys) * density), 280)
+        return None, 0
+    n_marks = min(int(len(ys) * density), cap)
     if n_marks == 0:
-        return
+        return None, 0
     idx = np.random.choice(len(ys), size=n_marks, replace=False)
+    return idx, n_marks
+
+
+def _draw_stipple_default(draw: ImageDraw.Draw, x: int, y: int, color: tuple) -> None:
+    if random.random() < 0.55:
+        r = random.choice([1, 1, 1, 2])
+        draw.ellipse([x - r, y - r, x + r, y + r], fill=color)
+    else:
+        pts = [
+            (x + random.randint(-6, 6), y + random.randint(-3, 3))
+            for _ in range(3)
+        ]
+        draw.line(pts, fill=color, width=1)
+
+
+def _mark_wool(draw: ImageDraw.Draw, x: int, y: int, color: tuple) -> None:
+    """Tight curls + fibre dots (crimped yarn)."""
+    if random.random() < 0.4:
+        r = random.choice([1, 2])
+        draw.ellipse([x - r, y - r, x + r, y + r], fill=color)
+        return
+    r0 = random.uniform(3.0, 6.0)
+    pts = []
+    for k in range(5):
+        ang = -0.8 + k * 0.55
+        pts.append(
+            (int(x + r0 * math.cos(ang)), int(y + r0 * math.sin(ang)))
+        )
+    draw.line(pts, fill=color, width=1)
+
+
+def _mark_cashmere(draw: ImageDraw.Draw, x: int, y: int, color: tuple) -> None:
+    """Softer, loftier loops than wool."""
+    if random.random() < 0.5:
+        r = random.choice([1, 2])
+        draw.ellipse([x - r, y - r, x + r, y + r], fill=color)
+        return
+    r0 = random.uniform(5.0, 9.0)
+    pts = []
+    for k in range(4):
+        ang = -0.5 + k * 0.65
+        pts.append(
+            (int(x + r0 * math.cos(ang)), int(y + r0 * math.sin(ang)))
+        )
+    draw.line(pts, fill=color, width=1)
+
+
+def _mark_cotton(draw: ImageDraw.Draw, x: int, y: int, color: tuple) -> None:
+    """Matte yarn: small crosses + occasional dot."""
+    if random.random() < 0.65:
+        s = random.randint(2, 4)
+        draw.line([(x - s, y - s), (x + s, y + s)], fill=color, width=1)
+        draw.line([(x - s, y + s), (x + s, y - s)], fill=color, width=1)
+    else:
+        r = 1
+        draw.ellipse([x - r, y - r, x + r, y + r], fill=color)
+
+
+def _mark_linen(draw: ImageDraw.Draw, x: int, y: int, color: tuple) -> None:
+    """Slub weave: short parallel hash strokes."""
+    ang = random.uniform(-0.5, 0.5)
+    ca, sa = math.cos(ang), math.sin(ang)
+    L = random.randint(5, 10)
+    for off in (-2, 0, 2):
+        ox, oy = -sa * off, ca * off
+        x0, y0 = int(x + ox - ca * L / 2), int(y + oy - sa * L / 2)
+        x1, y1 = int(x + ox + ca * L / 2), int(y + oy + sa * L / 2)
+        draw.line([(x0, y0), (x1, y1)], fill=color, width=1)
+
+
+def _mark_denim(draw: ImageDraw.Draw, x: int, y: int, color: tuple) -> None:
+    """Twill hint: short diagonal slashes."""
+    sign = random.choice([-1.0, 1.0])
+    ang = sign * math.pi / 4 + random.uniform(-0.12, 0.12)
+    L = random.randint(8, 14)
+    ca, sa = math.cos(ang), math.sin(ang)
+    x0, y0 = int(x - ca * L / 2), int(y - sa * L / 2)
+    x1, y1 = int(x + ca * L / 2), int(y + sa * L / 2)
+    draw.line([(x0, y0), (x1, y1)], fill=color, width=1)
+
+
+def _mark_silk(draw: ImageDraw.Draw, x: int, y: int, color: tuple) -> None:
+    """Fluid lustre lines (long, smooth)."""
+    n = random.randint(5, 8)
+    pts = []
+    base = random.uniform(0, 2 * math.pi)
+    for k in range(n):
+        t = k * 0.9
+        pts.append(
+            (
+                int(x + t * 2.2 + 2.0 * math.sin(base + t * 0.7)),
+                int(y + t * 1.1 + 1.5 * math.cos(base + t * 0.5)),
+            )
+        )
+    draw.line(pts, fill=color, width=1)
+
+
+def _mark_satin(draw: ImageDraw.Draw, x: int, y: int, color: tuple) -> None:
+    """Longer, straighter glide strokes than silk."""
+    n = random.randint(6, 10)
+    ang = random.uniform(-0.35, 0.35)
+    ca, sa = math.cos(ang), math.sin(ang)
+    pts = []
+    for k in range(n):
+        d = k * 2.8 + random.uniform(-0.4, 0.4)
+        pts.append((int(x + d * ca), int(y + d * sa)))
+    draw.line(pts, fill=color, width=1)
+
+
+def _mark_chiffon(draw: ImageDraw.Draw, x: int, y: int, color: tuple) -> None:
+    """Light, airy waves."""
+    n = random.randint(4, 7)
+    pts = []
+    for k in range(n):
+        pts.append(
+            (
+                int(x + k * 2 + random.randint(-2, 2)),
+                int(y + 3 * math.sin(k * 0.9) + random.randint(-1, 1)),
+            )
+        )
+    draw.line(pts, fill=color, width=1)
+
+
+def _mark_velvet(draw: ImageDraw.Draw, x: int, y: int, color: tuple) -> None:
+    """Pile: short rays from a point."""
+    n_ray = random.randint(5, 9)
+    r = random.randint(3, 6)
+    for _ in range(n_ray):
+        ang = random.uniform(0, 2 * math.pi)
+        x1 = int(x + r * math.cos(ang))
+        y1 = int(y + r * math.sin(ang))
+        draw.line([(x, y), (x1, y1)], fill=color, width=1)
+
+
+def _mark_leather(draw: ImageDraw.Draw, x: int, y: int, color: tuple) -> None:
+    """Irregular crease scratches."""
+    n = random.randint(3, 5)
+    cx, cy = float(x), float(y)
+    pts = [(int(cx), int(cy))]
+    for _ in range(n):
+        cx += random.uniform(-5.0, 5.0)
+        cy += random.uniform(-4.0, 4.0)
+        pts.append((int(cx), int(cy)))
+    draw.line(pts, fill=color, width=1)
+
+
+_MATERIAL_MARK_CAP = {
+    "default": 280,
+    "silk": 200,
+    "satin": 200,
+    "chiffon": 160,
+    "leather": 220,
+    "velvet": 240,
+    "wool": 280,
+    "cashmere": 260,
+    "cotton": 300,
+    "linen": 260,
+    "denim": 280,
+}
+
+
+def draw_material_marks(
+    pil_img: Image.Image,
+    mid_mask: np.ndarray,
+    color: tuple,
+    density: float,
+    *,
+    material_type: Optional[str] = None,
+    material_label: str = "",
+) -> None:
+    """
+    Mid-tone marks that vary by **BRDF fabric preset** (wool, linen, …).
+    Albedo *pattern* (stripes, checks) stays in ``albedo_pattern_stroke_mask``;
+    this channel reads as *material handle* in the sketch language.
+    """
+    key = normalize_material_type(material_type, material_label)
+    cap = _MATERIAL_MARK_CAP.get(key, _MATERIAL_MARK_CAP["default"])
+    idx, _ = _mid_mask_sample_sites(mid_mask, density, cap)
+    if idx is None:
+        return
+
+    draw = ImageDraw.Draw(pil_img)
+    ys, xs = np.where(mid_mask > 0)
+
+    dispatch = {
+        "wool": _mark_wool,
+        "cashmere": _mark_cashmere,
+        "cotton": _mark_cotton,
+        "linen": _mark_linen,
+        "denim": _mark_denim,
+        "silk": _mark_silk,
+        "satin": _mark_satin,
+        "chiffon": _mark_chiffon,
+        "velvet": _mark_velvet,
+        "leather": _mark_leather,
+    }
+    marker = dispatch.get(key, _draw_stipple_default)
+
     for i in idx:
-        x, y = int(xs[i]), int(ys[i])
-        if random.random() < 0.55:
-            r = random.choice([1, 1, 1, 2])
-            draw.ellipse([x - r, y - r, x + r, y + r], fill=color)
-        else:
-            pts = [
-                (x + random.randint(-6, 6), y + random.randint(-3, 3))
-                for _ in range(3)
-            ]
-            draw.line(pts, fill=color, width=1)
+        marker(draw, int(xs[i]), int(ys[i]), color)
+
+
+def draw_fabric_stipple(
+    pil_img: Image.Image,
+    mid_mask: np.ndarray,
+    color: tuple,
+    density: float = 0.006,
+) -> None:
+    """Backward-compatible: same as ``default`` material marks."""
+    draw_material_marks(
+        pil_img, mid_mask, color, density,
+        material_type=None, material_label="",
+    )
+
+
+def albedo_pattern_stroke_mask(
+    tex_bgr: np.ndarray,
+    out_h: int,
+    out_w: int,
+    tile_u: float,
+    tile_v: float,
+    interior_mask: np.ndarray,
+    pattern_name: Optional[str] = None,
+) -> np.ndarray:
+    """
+    Tile the procedural *albedo map* across the frame (scale from ``albedo_tiling``)
+    and extract sparse boundary strokes so conditioning matches Mitsuba ``base_color``
+    pattern identity, independent of lighting.
+    """
+    if pattern_name and pattern_name.lower() == "solid":
+        return np.zeros((out_h, out_w), dtype=np.uint8)
+    if tex_bgr is None or tex_bgr.size == 0:
+        return np.zeros((out_h, out_w), dtype=np.uint8)
+    if interior_mask.shape[:2] != (out_h, out_w):
+        raise ValueError("interior_mask must match (out_h, out_w)")
+
+    th, tw = tex_bgr.shape[:2]
+    if th < 2 or tw < 2:
+        return np.zeros((out_h, out_w), dtype=np.uint8)
+
+    # Map renderer UV tiling to ~2–16 repeats across the image (no UV span in metadata).
+    rep = (float(tile_u) + float(tile_v)) * 1.2
+    rep = float(np.clip(rep, 2.0, 16.0))
+    cell_w = max(4, int(round(out_w / rep)))
+    aspect = th / float(tw)
+    cell_h = max(4, int(round(cell_w * aspect)))
+
+    small = cv2.resize(tex_bgr, (cell_w, cell_h), interpolation=cv2.INTER_AREA)
+    yh, xw = small.shape[:2]
+    ny = max(1, (out_h + yh - 1) // yh)
+    nx = max(1, (out_w + xw - 1) // xw)
+    mosaic = np.tile(small, (ny, nx, 1))[:out_h, :out_w].copy()
+
+    gray = cv2.cvtColor(mosaic, cv2.COLOR_BGR2GRAY)
+    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    mag = np.sqrt(gx * gx + gy * gy)
+
+    m = interior_mask > 0
+    if not np.any(m):
+        return np.zeros((out_h, out_w), dtype=np.uint8)
+    vals = mag[m]
+    if vals.size == 0 or float(np.std(vals)) < 0.35:
+        return np.zeros((out_h, out_w), dtype=np.uint8)
+
+    interior_px = int(np.count_nonzero(m))
+    # Stripes / checks often yield high Sobel magnitude on most interior pixels at a
+    # fixed percentile (e.g. 86), which reads as a solid fill.  Raise the cutoff
+    # until only a sparse fraction of the eroded interior is ink (~pattern edges).
+    #
+    # Measure coverage *before* MORPH_OPEN: a 2×2 open can delete legitimate thin
+    # strokes; using opened coverage caused us to return an empty mask when
+    # ``0 <= max_frac`` (early exit) and broke sparse patterns like wide stripes.
+    max_interior_frac = 0.34
+    k2 = np.ones((2, 2), np.uint8)
+    chosen = np.zeros((out_h, out_w), dtype=np.uint8)
+    for pct in (86, 90, 93, 96, 98, 99.0, 99.5, 99.8):
+        thr = float(np.percentile(vals, pct))
+        raw_bin = ((mag >= thr).astype(np.uint8) * 255)
+        raw_bin = cv2.bitwise_and(raw_bin, interior_mask)
+        cov = int(np.count_nonzero(raw_bin > 0))
+        if interior_px <= 0:
+            return chosen
+        frac = cov / interior_px
+        chosen = raw_bin
+        if cov > 0 and frac <= max_interior_frac:
+            break
+
+    cov_final = int(np.count_nonzero(chosen > 0))
+    if cov_final == 0:
+        return np.zeros((out_h, out_w), dtype=np.uint8)
+    if cov_final / interior_px > max_interior_frac:
+        # Strong ties / saturated gradients: keep only the strongest magnitudes.
+        ys_i, xs_i = np.where(interior_mask > 0)
+        vm = mag[ys_i, xs_i]
+        k = max(50, int(interior_px * max_interior_frac))
+        k = min(k, vm.size)
+        pick = np.argpartition(-vm, k - 1)[:k]
+        chosen = np.zeros((out_h, out_w), dtype=np.uint8)
+        chosen[ys_i[pick], xs_i[pick]] = 255
+
+    opened = cv2.morphologyEx(chosen, cv2.MORPH_OPEN, k2)
+    if int(np.count_nonzero(opened > 0)) == 0:
+        return chosen
+    return opened
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -276,6 +586,35 @@ def _draw_arrow(
         draw.line([tip, (hx, hy)], fill=color, width=width)
 
 
+def measure_top_left_text_pad(
+    text_lines: list,
+    *,
+    margin: int = 18,
+    line_step: int = 22,
+    gutter: int = 20,
+) -> tuple[int, int]:
+    """
+    Return ``(pad_left, pad_top)`` so a ``(h, w)`` sketch can be placed at
+    ``(pad_left, pad_top)`` with no overlap with the text block drawn at
+    ``(margin, margin)`` using ``font_sm`` (18) and halo stroke.
+    """
+    font = resolve_font(18)
+    tmp = Image.new("RGB", (8, 8))
+    dr = ImageDraw.Draw(tmp)
+    max_r = margin
+    max_b = margin
+    y = margin
+    stroke_slack = 10
+    for line in text_lines:
+        bbox = dr.textbbox((margin, y), line, font=font)
+        max_r = max(max_r, bbox[2] + stroke_slack)
+        max_b = max(max_b, bbox[3] + stroke_slack // 2)
+        y += line_step
+    pad_left = int(max_r + gutter)
+    pad_top = int(max_b + gutter)
+    return pad_left, pad_top
+
+
 def draw_annotations(
     draw:         ImageDraw.Draw,
     text_lines:   list,
@@ -283,24 +622,26 @@ def draw_annotations(
     canvas_wh:    tuple,
     color:        tuple,
     boundary_top: "tuple | None" = None,
+    sketch_content_top: int = 0,
 ) -> None:
     """
     Full annotation layout matching the Zahra / fashion-flat sketch grammar:
 
-      • Text block       (top-left, font 22): material name + colour, texture
-                         type, keyword.
+      • Text block       (top-left, font 18): material, object + colour, keyword.
       • "Segmentation    (top-centre, font 18): arrow pointing to the top of
         Mask"             the dashed rectangular boundary.
       • "Highlight"      (font 18): small outlined circle at the highlight
                          centroid + label at right canvas edge.
       • "Shadow"         (font 22): label at left canvas edge, arrow to the
                          hatched shadow zone.
+
+    ``sketch_content_top`` — y coordinate where the sketch raster begins; keeps
+    the Highlight label from being pulled up into the reserved text band.
     """
     W, H    = canvas_wh
     margin  = 18
     font_lg = resolve_font(22)
     font_sm = resolve_font(18)
-    _font_xs = resolve_font(14)
 
     # All text uses stroke_width=3 with a white stroke_fill so each label
     # carries its own tight halo.  This keeps every annotation legible even
@@ -309,7 +650,8 @@ def draw_annotations(
     HALO = {"stroke_width": 3, "stroke_fill": (255, 255, 255)}
 
     # y below the text block — used to keep Shadow label clear of the text
-    y_below_text = margin + len(text_lines) * 20
+    _line_h = 22
+    y_below_text = margin + len(text_lines) * _line_h
 
     # ── Segmentation Mask label (top-right) + arrow to boundary top ──────────
     if boundary_top is not None:
@@ -332,7 +674,8 @@ def draw_annotations(
     h_pt = features.get("highlight")
     if h_pt:
         _draw_wobbly_circle(draw, h_pt, radius=18, color=color, width=2)
-        _right_label("Highlight", h_pt, min_y=80, max_y=H - 60)
+        _hi_min = max(80, sketch_content_top + 8)
+        _right_label("Highlight", h_pt, min_y=_hi_min, max_y=H - 60)
 
     # ── Shadow: label at left canvas edge, arrow points right ────────────────
     s_pt = features.get("shadow")
@@ -343,9 +686,9 @@ def draw_annotations(
         draw.text((lx, ly), "Shadow", font=font_lg, fill=color, **HALO)
         _draw_arrow(draw, (lx + 84, ly + 13), (sx, sy), color, width=2)
 
-    # ── 3-line text block (top-left) — disabled ──────────────────────────────
-    # y = margin
-    # for line in text_lines:
-    #     draw.text((margin, y), line, font=_font_xs, fill=color, **HALO)
-    #     y += 20
+    # ── Text block (top-left): material, object/colour, keyword ──────────────
+    y = margin
+    for line in text_lines:
+        draw.text((margin, y), line, font=font_sm, fill=color, **HALO)
+        y += _line_h
 
