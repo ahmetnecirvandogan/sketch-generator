@@ -65,21 +65,25 @@ def generate_sketch(
     # Pass normal_path so the detector can use the geometry-only normal-map
     # gradient when the .npy file exists, skipping wool micro-texture noise.
     edges = detect_edges(img_bgr, seg_mask=seg_mask, normal_path=normal_path)
+    # HED / normal / Canny all fire strongly on the object rim; those pixels stack
+    # with the wobbly silhouette and read as a fat outer edge.  Keep structural
+    # edges only on the eroded interior so the outline is a single thin stroke.
+    _k = np.ones((5, 5), np.uint8)
+    interior_for_edges = cv2.erode(seg_mask, _k, iterations=1)
+    edges = cv2.bitwise_and(edges, interior_for_edges)
     canvas[edges > 0] = SKETCH_BGR
 
     # ── A+: Wobbly outer silhouette from segmentation mask contour ───────────
-    # draw_wobbly_contour adds per-segment Gaussian jitter (±1.5 px) so the
-    # boundary reads as a bold, organic marker stroke rather than a perfect
-    # vector outline.  Thickness base=3 px matches the flat-drawing rule:
-    # outer edge = thickest line.
+    # CHAIN_APPROX_NONE → full boundary; draw_wobbly_contour resamples to one
+    # continuous polyline. base_thickness=1.5 → 1 px core + half-weight outer ring.
     outer_cnts, _ = cv2.findContours(
-        seg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        seg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
     )
     if outer_cnts:
         draw_wobbly_contour(
             canvas,
             max(outer_cnts, key=cv2.contourArea),
-            SKETCH_BGR, base_thickness=3, wobble_amp=1.0, wobble_freq=2,
+            SKETCH_BGR, base_thickness=1.5, wobble_amp=1.0, wobble_freq=2,
         )
 
     # ── C: Shadow hatching — single 45° direction only ────────────────────────
@@ -153,6 +157,6 @@ def generate_sketch(
     )
     canvas = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
 
-    # Minimal ink-bleed softening — keeps lines crisp but removes aliasing
-    canvas = cv2.GaussianBlur(canvas, (3, 3), 0.5)
+    # Soften aliasing; sigma between “hairline” and original heavy bleed.
+    canvas = cv2.GaussianBlur(canvas, (3, 3), 0.42)
     return canvas

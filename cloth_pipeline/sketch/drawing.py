@@ -9,75 +9,146 @@ from PIL import Image, ImageDraw
 
 from cloth_pipeline.sketch.constants import resolve_font
 
+
+def _resample_closed_polyline(pts: np.ndarray, step: float) -> np.ndarray:
+    """Evenly spaced samples along a closed polygon (pts not duplicated at end)."""
+    n = pts.shape[0]
+    if n < 3:
+        return pts.astype(np.float64)
+    cum = [0.0]
+    for i in range(n):
+        j = (i + 1) % n
+        cum.append(
+            cum[-1]
+            + float(np.hypot(pts[j, 0] - pts[i, 0], pts[j, 1] - pts[i, 1]))
+        )
+    total = cum[-1]
+    if total < 1.0:
+        return pts.astype(np.float64)
+    n_new = max(32, int(round(total / step)))
+    out = np.empty((n_new, 2), dtype=np.float64)
+    for m in range(n_new):
+        d = (m / n_new) * total
+        k = 0
+        while k < n and cum[k + 1] < d:
+            k += 1
+        k = min(k, n - 1)
+        seg_len = cum[k + 1] - cum[k]
+        if seg_len < 1e-9:
+            t = 0.0
+        else:
+            t = (d - cum[k]) / seg_len
+        i, j = k, (k + 1) % n
+        out[m, 0] = pts[i, 0] * (1.0 - t) + pts[j, 0] * t
+        out[m, 1] = pts[i, 1] * (1.0 - t) + pts[j, 1] * t
+    return out
+
+
+def _smooth_closed_polyline(xy: np.ndarray, passes: int, window: int) -> np.ndarray:
+    """Circular moving average — softens pixel staircase before wobble."""
+    n = xy.shape[0]
+    if n < window:
+        return xy
+    half = window // 2
+    p = xy.astype(np.float64).copy()
+    for _ in range(passes):
+        q = np.zeros_like(p)
+        for i in range(n):
+            sx = sy = 0.0
+            for j in range(-half, half + 1):
+                sx += p[(i + j) % n, 0]
+                sy += p[(i + j) % n, 1]
+            q[i, 0] = sx / window
+            q[i, 1] = sy / window
+        p = q
+    return p
+
+
 def draw_wobbly_contour(
     canvas:         np.ndarray,
     contour:        np.ndarray,
     color_bgr:      tuple,
-    base_thickness: int   = 3,
+    base_thickness: float = 1.0,
     wobble_amp:     float = 1.0,
     wobble_freq:    int   = 2,
+    sample_step:    float = 2.0,
 ) -> None:
     """
-    Traces the contour with a smooth, low-frequency sine-wave wobble applied
-    perpendicular to the local path direction.
-
-    Unlike per-point Gaussian noise (which gives jagged, spiky digital
-    artifacts), the wobble is parameterised by cumulative arc-length so
-    adjacent points receive nearly identical displacements — the result
-    looks like a confident but slightly imperfect marker stroke drawn by
-    a human hand.
-
-    Three harmonics (freq, 2×freq, 3×freq) with independent random phase
-    offsets are summed so the shape is irregular without any periodicity.
+    One continuous closed stroke: resample, smooth, arc-length wobble, then draw.
+    ``base_thickness`` may be fractional in (1, 2): full ink on a 1 px core and
+    a (2−1) px halo blended toward white with weight (t−1), approximating t px
+    (e.g. 1.5 → half-weight outer ring).  Otherwise ``round(t)`` is passed to
+    ``cv2.polylines`` (LINE_AA).
     """
-    pts_raw = contour.reshape(-1, 2).astype(float)
-    n       = len(pts_raw)
-    if n < 3:
+    pts_raw = contour.reshape(-1, 2).astype(np.float64)
+    n_orig = pts_raw.shape[0]
+    if n_orig < 3:
         return
 
-    # Cumulative arc lengths for smooth parameterisation
-    arc = [0.0]
+    base = _resample_closed_polyline(pts_raw, sample_step)
+    base = _smooth_closed_polyline(base, passes=2, window=5)
+
+    n = base.shape[0]
+    arc = np.zeros(n, dtype=np.float64)
     for i in range(1, n):
-        arc.append(arc[-1] + math.hypot(
-            pts_raw[i, 0] - pts_raw[i - 1, 0],
-            pts_raw[i, 1] - pts_raw[i - 1, 1],
-        ))
-    total_arc = arc[-1] + math.hypot(
-        pts_raw[0, 0] - pts_raw[n - 1, 0],
-        pts_raw[0, 1] - pts_raw[n - 1, 1],
+        arc[i] = arc[i - 1] + float(
+            np.hypot(base[i, 0] - base[i - 1, 0], base[i, 1] - base[i - 1, 1])
+        )
+    arc_close = arc[-1] + float(
+        np.hypot(base[0, 0] - base[-1, 0], base[0, 1] - base[-1, 1])
     )
-    if total_arc < 1.0:
+    if arc_close < 1.0:
         return
+    total_arc = float(arc_close)
 
-    # Random phase offsets fixed once per call → smooth, non-repeating wave
     phases = [random.uniform(0.0, 2 * math.pi) for _ in range(3)]
-    amps   = [wobble_amp, wobble_amp * 0.35, wobble_amp * 0.15]
-    freqs  = [wobble_freq, wobble_freq * 2, wobble_freq * 3]
+    amps = [wobble_amp, wobble_amp * 0.35, wobble_amp * 0.15]
+    freqs = [wobble_freq, wobble_freq * 2, wobble_freq * 3]
 
     def _d(s: float) -> float:
-        t = 2 * math.pi * s / total_arc
-        return sum(a * math.sin(f * t + p) for a, f, p in zip(amps, freqs, phases))
+        tt = 2 * math.pi * s / total_arc
+        return sum(a * math.sin(f * tt + p) for a, f, p in zip(amps, freqs, phases))
 
-    # Build displaced point array
-    disp = []
+    final = np.empty_like(base)
     for i in range(n):
         prev_i = (i - 1) % n
         next_i = (i + 1) % n
-        dx = pts_raw[next_i, 0] - pts_raw[prev_i, 0]
-        dy = pts_raw[next_i, 1] - pts_raw[prev_i, 1]
+        dx = base[next_i, 0] - base[prev_i, 0]
+        dy = base[next_i, 1] - base[prev_i, 1]
         length = math.hypot(dx, dy)
         nx, ny = (-dy / length, dx / length) if length > 0.5 else (0.0, 1.0)
         d = _d(arc[i])
-        disp.append((
-            int(round(pts_raw[i, 0] + nx * d)),
-            int(round(pts_raw[i, 1] + ny * d)),
-        ))
+        final[i, 0] = base[i, 0] + nx * d
+        final[i, 1] = base[i, 1] + ny * d
 
-    for i in range(n):
-        p1 = disp[i]
-        p2 = disp[(i + 1) % n]
-        t  = max(1, base_thickness + random.choice([-1, 0, 0, 0, 1]))
-        cv2.line(canvas, p1, p2, color_bgr, t)
+    pts_i32 = np.round(final).astype(np.int32).reshape(-1, 1, 2)
+    t = float(base_thickness)
+    h, w = canvas.shape[:2]
+
+    if 1.0 < t < 2.0:
+        # Integer polylines only: emulate fractional width with core + soft halo.
+        ring_w = float(t - 1.0)
+        inner_m = np.zeros((h, w), np.uint8)
+        outer_m = np.zeros((h, w), np.uint8)
+        cv2.polylines(inner_m, [pts_i32], True, 255, 1, cv2.LINE_8)
+        cv2.polylines(outer_m, [pts_i32], True, 255, 2, cv2.LINE_8)
+        inner = inner_m > 0
+        ring = (outer_m > 0) & ~inner
+        canvas[inner] = color_bgr
+        inv = 1.0 - ring_w
+        ink = np.array(color_bgr, dtype=np.float64)
+        halo = (ring_w * ink + inv * 255.0).astype(np.uint8)
+        canvas[ring] = halo
+    else:
+        thick = max(1, min(255, int(round(t))))
+        cv2.polylines(
+            canvas,
+            [pts_i32],
+            isClosed=True,
+            color=color_bgr,
+            thickness=thick,
+            lineType=cv2.LINE_AA,
+        )
 
 
 def draw_wool_texture(
