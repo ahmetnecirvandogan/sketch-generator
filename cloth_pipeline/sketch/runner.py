@@ -80,6 +80,10 @@ def run_from_metadata() -> None:
         albedo_map_path = (
             os.path.join(DATASET_DIR, tex_rel) if tex_rel else None
         )
+        mask_rel = meta.get("mask_image")
+        alpha_mask_path = (
+            os.path.join(DATASET_DIR, mask_rel) if mask_rel else None
+        )
 
         try:
             sketch = generate_sketch(
@@ -87,6 +91,7 @@ def run_from_metadata() -> None:
                 obj_name,
                 material_label,
                 keyword,
+                alpha_mask_path=alpha_mask_path,
                 albedo_map_path=albedo_map_path,
                 albedo_tiling=_albedo_tiling_from_meta(meta),
                 pattern_name=_pattern_name_from_meta(meta),

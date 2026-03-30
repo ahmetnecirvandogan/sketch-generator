@@ -13,6 +13,7 @@ from cloth_pipeline.dataset.textures import generate_random_albedo_map
 from cloth_pipeline.paths import (
     DATASET_DIR,
     DEPTH_DIR,
+    MASKS_DIR,
     MESHES_DIR,
     METADATA_PATH,
     NORMALS_DIR,
@@ -56,6 +57,7 @@ def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
         if os.path.exists(os.path.join(RENDERS_DIR,  f"render_{j:04d}.png"))
         and os.path.exists(os.path.join(DEPTH_DIR,   f"depth_{j:04d}.npy"))
         and os.path.exists(os.path.join(NORMALS_DIR, f"normals_{j:04d}.npy"))
+        and os.path.exists(os.path.join(MASKS_DIR,   f"mask_{j:04d}.png"))
     )
     print(f"Checkpoint: {existing}/{num_samples} frames already done, resuming.\n")
 
@@ -64,11 +66,13 @@ def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
         render_path  = os.path.join(RENDERS_DIR,  f"render_{frame_str}.png")
         depth_path   = os.path.join(DEPTH_DIR,    f"depth_{frame_str}.npy")
         normals_path = os.path.join(NORMALS_DIR,  f"normals_{frame_str}.npy")
+        mask_path    = os.path.join(MASKS_DIR,    f"mask_{frame_str}.png")
 
         # --- CHECKPOINT: skip frames that are fully complete (and have metadata) ---
         if (os.path.exists(render_path)
                 and os.path.exists(depth_path)
-                and os.path.exists(normals_path)):
+                and os.path.exists(normals_path)
+                and os.path.exists(mask_path)):
             if frame_str in existing_metadata:
                 metadata_records.append(existing_metadata[frame_str])
                 print(f"  [{i+1:>4}/{num_samples}] Skipping {frame_str} (already exists)")
@@ -446,18 +450,21 @@ def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
 
         print(f"  [{i+1:>3}/{num_samples}] Raw tensor shape: {render_np.shape} | brightness: {mean_lum:.3f}")
 
-        # ---- Save beauty render (8-bit RGBA PNG) ----
-        # The alpha channel (channel 3) is 1.0 wherever the cloth exists and 0.0
-        # for the pure-black background — independent of shading or shadow darkness.
-        # generate_sketches.py reads this alpha to build a perfect object mask so
-        # shadow areas are never incorrectly excluded from the silhouette.
+        # ---- Save beauty render (8-bit BGRA PNG with visible background) ----
+        # Composite the cloth over a solid light-gray backdrop so renders look
+        # presentation-ready out of the box (no transparent checkerboard / black).
+        #
+        # Save cloth coverage to a separate mask file for Stage 2 segmentation.
         beauty_np    = np.clip(render_np[:, :, :3], 0.0, 1.0)
         alpha_np     = np.clip(render_np[:, :, 3],  0.0, 1.0) if render_np.shape[2] >= 4 else np.ones(render_np.shape[:2], np.float32)
-        beauty_uint8 = (beauty_np * 255).astype(np.uint8)
-        alpha_uint8  = (alpha_np  * 255).astype(np.uint8)
-        bgr_uint8    = cv2.cvtColor(beauty_uint8, cv2.COLOR_RGB2BGR)
+        bg_rgb       = np.array([0.82, 0.82, 0.82], dtype=np.float32)  # ~RGB(209,209,209)
+        comp_np      = beauty_np * alpha_np[..., None] + bg_rgb * (1.0 - alpha_np[..., None])
+        comp_uint8   = (comp_np * 255).astype(np.uint8)
+        bgr_uint8    = cv2.cvtColor(comp_uint8, cv2.COLOR_RGB2BGR)
+        alpha_uint8  = np.full(alpha_np.shape, 255, dtype=np.uint8)
         bgra_uint8   = np.dstack([bgr_uint8, alpha_uint8])
         cv2.imwrite(render_path, bgra_uint8)
+        cv2.imwrite(mask_path, (alpha_np * 255).astype(np.uint8))
 
         # ---- Save depth map (float32 .npy — lossless, no codec needed) ----
         if render_np.shape[2] >= 5:
@@ -492,6 +499,7 @@ def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
             "file_name":          f"renders/render_{frame_str}.png",
             "depth_image":        f"depth/depth_{frame_str}.npy",
             "normals_image":      f"normals/normals_{frame_str}.npy",
+            "mask_image":         f"masks/mask_{frame_str}.png",
             "conditioning_image": f"conditioning/conditioning_{frame_str}.png",
             "text":               f"Cloth Scarf, {material_desc} material, {prompt}",
             "keyword":             keyword,
