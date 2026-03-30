@@ -28,8 +28,9 @@ Optional `handwriting.ttf` in the project root improves label rendering; otherwi
 |------|------|
 | `cloth_meshes/` | Input `.obj` meshes (you provide) |
 | `cloth_pipeline/` | Library code (dataset render loop, sketch pipeline) |
-| `dataset/renders/` | Beauty RGBA PNGs |
+| `dataset/renders/` | Beauty PNGs composited on a light-gray background |
 | `dataset/depth/`, `dataset/normals/` | Per-frame `.npy` buffers |
+| `dataset/masks/` | Per-frame cloth alpha masks (`mask_XXXX.png`) for sketch segmentation |
 | `dataset/textures/` | Procedural texture PNGs |
 | `dataset/metadata.jsonl` | One JSON object per frame (lighting, material, paths, …) |
 | `dataset/conditioning/` | Output sketch conditioning images (Stage 2) |
@@ -46,6 +47,11 @@ python generate_dataset.py
 
 Default sample count is set in `cloth_pipeline/dataset/render_loop.py` (`run_generation`). Existing frames are skipped when outputs and metadata already exist (checkpointing).
 
+Stage 1 writes:
+- render image with visible light-gray background (easy to inspect; no checkerboard transparency preview)
+- depth + normals as `.npy`
+- binary cloth mask in `dataset/masks/` used by Stage 2 segmentation
+
 **Stage 2 — sketches from metadata**
 
 ```bash
@@ -53,6 +59,15 @@ python generate_sketches.py
 ```
 
 Requires `dataset/metadata.jsonl` and the render paths it references (normally after Stage 1). Existing `conditioning_*.png` files are skipped.
+
+### Sketch options
+
+Texture/pattern strokes are disabled by default to avoid grid artifacts in conditioning sketches.
+
+- Enable with full variable name:
+  - `USE_TEXTURE_STROKES=true python generate_sketches.py`
+- Or use the short alias:
+  - `UTS=1 python generate_sketches.py`
 
 ## Mitsuba note
 
