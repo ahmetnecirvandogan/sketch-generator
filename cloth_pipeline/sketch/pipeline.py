@@ -9,7 +9,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from cloth_pipeline.paths import DATASET_DIR
-from cloth_pipeline.sketch.constants import SKETCH_BGR, SKETCH_RGB
+from cloth_pipeline.sketch.constants import SKETCH_BGR, SKETCH_RGB, USE_TEXTURE_STROKES
 from cloth_pipeline.sketch.drawing import (
     albedo_pattern_stroke_mask,
     draw_annotations,
@@ -31,6 +31,7 @@ def generate_sketch(
     material_label: str,
     keyword:        str,
     *,
+    alpha_mask_path: str | None = None,
     albedo_map_path: str | None = None,
     albedo_tiling:   tuple[float, float] | None = None,
     pattern_name:    str | None = None,
@@ -62,6 +63,12 @@ def generate_sketch(
     else:
         img_bgr = img_raw                    # legacy RGB-only render
         alpha   = None
+
+    # Prefer dedicated Stage-1 mask when present (independent of render alpha).
+    if alpha_mask_path and os.path.isfile(alpha_mask_path):
+        alpha_mask = cv2.imread(alpha_mask_path, cv2.IMREAD_GRAYSCALE)
+        if alpha_mask is not None and alpha_mask.shape[:2] == img_bgr.shape[:2]:
+            alpha = alpha_mask
 
     h, w = img_bgr.shape[:2]
 
@@ -95,10 +102,9 @@ def generate_sketch(
     edges = cv2.bitwise_and(edges, interior_for_edges)
     canvas[edges > 0] = SKETCH_BGR
 
-    # ── A−: Albedo pattern from the same bitmap used as Mitsuba base_color ─────
-    # Tied to material / pattern identity; not view- or lighting-dependent.
-    albedo_pat = None
-    if albedo_map_path and os.path.isfile(albedo_map_path):
+    # ── A−: Optional albedo pattern strokes ───────────────────────────────────
+    # Disabled by default to avoid tiled/grid artifacts in conditioning sketches.
+    if USE_TEXTURE_STROKES and albedo_map_path and os.path.isfile(albedo_map_path):
         tex_bgr = cv2.imread(albedo_map_path, cv2.IMREAD_COLOR)
         if tex_bgr is not None:
             tu, tv = 4.0, 4.0

@@ -56,6 +56,10 @@ def _threshold_mask(
       2. Brightness threshold fallback for legacy RGB-only renders.
     """
     if alpha is not None and alpha.max() > 0:
+        # Ignore uninformative alpha (fully opaque image after background compositing).
+        if int(alpha.min()) == 255 and int(alpha.max()) == 255:
+            alpha = None
+    if alpha is not None and alpha.max() > 0:
         _, mask = cv2.threshold(alpha, 10, 255, cv2.THRESH_BINARY)
         k    = np.ones((5, 5), np.uint8)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k, iterations=2)

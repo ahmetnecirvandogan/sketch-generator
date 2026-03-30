@@ -18,6 +18,25 @@ SAM_CHECKPOINT = os.environ.get(
 )
 SAM_MODEL_TYPE = "vit_h"
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+# Long + short env aliases (short form is easier to type).
+# Priority:
+#   1) USE_TEXTURE_STROKES
+#   2) UTS
+#   3) default False
+if os.environ.get("USE_TEXTURE_STROKES") is not None:
+    USE_TEXTURE_STROKES = _env_bool("USE_TEXTURE_STROKES", False)
+elif os.environ.get("UTS") is not None:
+    USE_TEXTURE_STROKES = _env_bool("UTS", False)
+else:
+    USE_TEXTURE_STROKES = False
+
 _FONT_CANDIDATES = [
     os.path.join(BASE_DIR, "handwriting.ttf"),
     "/System/Library/Fonts/Supplemental/Chalkduster.ttf",
