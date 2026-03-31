@@ -13,7 +13,6 @@ from cloth_pipeline.sketch.constants import SKETCH_BGR, SKETCH_RGB, USE_TEXTURE_
 from cloth_pipeline.sketch.drawing import (
     albedo_pattern_stroke_mask,
     draw_annotations,
-    draw_cross_section_arcs,
     draw_depth_layer_boundary,
     draw_occlusion_edges,
     draw_wobbly_contour,
@@ -200,9 +199,6 @@ def generate_sketch(
                     canvas, cnt, SKETCH_BGR,
                     base_thickness=1.0, wobble_amp=0.8, wobble_freq=2,
                 )
-
-    # ── A++++: Cross-section volume arcs in empty tube sections ──────────────
-    canvas = draw_cross_section_arcs(canvas, seg_mask, edges, SKETCH_BGR, n_arcs=3, thickness=1)
 
     # ── Colour detection for text ─────────────────────────────────────────────
     dominant_color = detect_dominant_color(img_bgr, seg_mask)
