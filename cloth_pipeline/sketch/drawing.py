@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 import random
 from typing import Optional
 
@@ -11,6 +12,207 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from cloth_pipeline.sketch.constants import resolve_font
+
+
+def draw_occlusion_edges(
+    canvas:     np.ndarray,
+    seg_mask:   np.ndarray,
+    depth_path: str,
+    color_bgr:  tuple,
+    thickness:  int = 2,
+) -> np.ndarray:
+    """Bold lines at depth discontinuities — where a near fold passes in front
+    of a far one.  Uses top-5% threshold globally, but relaxes to top-15% in
+    the lower half of the object so tail-separation boundaries get drawn even
+    when the dominant knot area outranks them globally."""
+    if not os.path.exists(depth_path):
+        return canvas
+    h, w = canvas.shape[:2]
+    depth = np.load(depth_path).astype(np.float32)
+    if depth.shape[:2] != (h, w):
+        depth = cv2.resize(depth, (w, h))
+    depth[seg_mask == 0] = 0.0
+    depth_s = cv2.GaussianBlur(depth, (5, 5), 1.0)
+    gx = cv2.Sobel(depth_s, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(depth_s, cv2.CV_32F, 0, 1, ksize=3)
+    grad = np.sqrt(gx ** 2 + gy ** 2)
+    mx = grad.max()
+    if mx < 1e-6:
+        return canvas
+    grad_u8 = (grad / mx * 255).astype(np.uint8)
+    eroded = cv2.erode(seg_mask, np.ones((7, 7), np.uint8), iterations=1)
+
+    # Split object into upper and lower halves at the median y of object pixels.
+    ys_obj, _ = np.where(seg_mask > 0)
+    y_mid = int(np.median(ys_obj)) if len(ys_obj) > 0 else h // 2
+
+    upper_region = np.zeros_like(seg_mask)
+    upper_region[:y_mid, :] = eroded[:y_mid, :]
+    lower_region = np.zeros_like(seg_mask)
+    lower_region[y_mid:, :] = eroded[y_mid:, :]
+
+    occ_mask = np.zeros_like(grad_u8)
+    for region, pct in ((upper_region, 95), (lower_region, 85)):
+        obj_grad = grad_u8[region > 0]
+        if obj_grad.size == 0:
+            continue
+        thresh = float(np.percentile(obj_grad, pct))
+        _, tmp = cv2.threshold(grad_u8, int(thresh), 255, cv2.THRESH_BINARY)
+        occ_mask = cv2.bitwise_or(occ_mask, cv2.bitwise_and(tmp, region))
+
+    occ_mask = cv2.dilate(occ_mask, np.ones((thickness, thickness), np.uint8), iterations=1)
+    canvas[occ_mask > 0] = color_bgr
+    return canvas
+
+
+def draw_depth_layer_boundary(
+    canvas:     np.ndarray,
+    seg_mask:   np.ndarray,
+    depth_path: str,
+    color_bgr:  tuple,
+    thickness:  int = 2,
+) -> np.ndarray:
+    """Draws the boundary between the near and far depth layers in the lower
+    half of the object — explicitly marking where two overlapping cloth tails
+    separate even when the segmentation mask merges them into one blob."""
+    if not os.path.exists(depth_path):
+        return canvas
+    h, w = canvas.shape[:2]
+    depth = np.load(depth_path).astype(np.float32)
+    if depth.shape[:2] != (h, w):
+        depth = cv2.resize(depth, (w, h))
+
+    ys_obj, _ = np.where(seg_mask > 0)
+    if len(ys_obj) == 0:
+        return canvas
+    y_split = int(np.percentile(ys_obj, 58))
+
+    lower_mask = np.zeros_like(seg_mask)
+    lower_mask[y_split:, :] = seg_mask[y_split:, :]
+    lower_depths = depth[lower_mask > 0]
+    if lower_depths.size < 50:
+        return canvas
+
+    depth_s = cv2.GaussianBlur(depth, (5, 5), 1.0)
+    gx = cv2.Sobel(depth_s, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(depth_s, cv2.CV_32F, 0, 1, ksize=3)
+    grad = np.sqrt(gx ** 2 + gy ** 2)
+    grad_vals = grad[lower_mask > 0]
+    if grad_vals.size < 50:
+        return canvas
+    grad_cut = float(np.percentile(grad_vals, 78))
+    strong_grad = ((grad >= grad_cut) & (lower_mask > 0)).astype(np.uint8) * 255
+
+    # Split lower region into near/far at the median depth.
+    median_d = float(np.median(lower_depths))
+    front = ((depth < median_d) & (lower_mask > 0)).astype(np.uint8) * 255
+    back  = ((depth >= median_d) & (lower_mask > 0)).astype(np.uint8) * 255
+
+    # Boundary = pixels of back layer that are adjacent to front layer, but
+    # only where there is an actual depth discontinuity. This avoids drawing an
+    # arbitrary "median split" line through a smoothly changing body section.
+    front_dilated = cv2.dilate(front, np.ones((3, 3), np.uint8), iterations=2)
+    boundary = cv2.bitwise_and(front_dilated, back)
+    boundary = cv2.bitwise_and(boundary, lower_mask)
+    boundary = cv2.bitwise_and(
+        boundary,
+        cv2.dilate(strong_grad, np.ones((3, 3), np.uint8), iterations=1),
+    )
+    if np.count_nonzero(boundary) < 20:
+        return canvas
+
+    ys_l, xs_l = np.where(lower_mask > 0)
+    obj_w = int(xs_l.max() - xs_l.min() + 1)
+    obj_h = int(ys_l.max() - ys_l.min() + 1)
+    n_lbl, lbl, stats, _ = cv2.connectedComponentsWithStats(boundary, connectivity=8)
+    clean = np.zeros_like(boundary)
+    for lbl_id in range(1, n_lbl):
+        x, y, bw, bh, area = stats[lbl_id]
+        if area < 14:
+            continue
+        if bw > 0.58 * obj_w and bh < max(12, int(0.10 * obj_h)):
+            continue
+        clean[lbl == lbl_id] = 255
+    boundary = clean
+    if np.count_nonzero(boundary) < 12:
+        return canvas
+    boundary = cv2.dilate(boundary, np.ones((thickness, thickness), np.uint8))
+    canvas[boundary > 0] = color_bgr
+    return canvas
+
+
+def draw_cross_section_arcs(
+    canvas:    np.ndarray,
+    seg_mask:  np.ndarray,
+    edges:     np.ndarray,
+    color_bgr: tuple,
+    n_arcs:    int = 3,
+    thickness: int = 2,
+) -> np.ndarray:
+    """Gentle bezier arcs across the tube width in regions with no existing
+    edges — communicates cylindrical volume in otherwise empty sections."""
+    h, w = canvas.shape[:2]
+    arc_mask = np.zeros((h, w), dtype=np.uint8)
+    dist = cv2.distanceTransform(seg_mask, cv2.DIST_L2, 5)
+    dilated_dist = cv2.dilate(dist, np.ones((7, 7), np.float32))
+    skeleton_mask = ((dist > 5) & (dist >= dilated_dist - 0.5)).astype(np.uint8) * 255
+    sk_ys, sk_xs = np.where(skeleton_mask > 0)
+    if len(sk_ys) < 10:
+        return canvas
+    ys_obj, _ = np.where(seg_mask > 0)
+    if ys_obj.size == 0:
+        return canvas
+    y_top = int(ys_obj.min())
+    y_bottom = int(ys_obj.max())
+    top_guard = int(y_top + 0.22 * max(1, (y_bottom - y_top)))
+    valid = sk_ys >= top_guard
+    sk_ys = sk_ys[valid]
+    sk_xs = sk_xs[valid]
+    if len(sk_ys) < 10:
+        return canvas
+    edge_dist = cv2.distanceTransform(255 - edges, cv2.DIST_L2, 5)
+    scores = np.array([float(edge_dist[sk_ys[i], sk_xs[i]]) for i in range(len(sk_ys))])
+    order = np.argsort(scores)[::-1]
+    selected = []
+    min_gap = h // 6
+    for idx in order:
+        if scores[idx] < 10.0:
+            break
+        pt = (int(sk_xs[idx]), int(sk_ys[idx]))
+        if all(math.hypot(pt[0] - s[0], pt[1] - s[1]) >= min_gap for s in selected):
+            selected.append(pt)
+        if len(selected) >= n_arcs:
+            break
+    for cx, cy in selected:
+        nearby = (np.abs(sk_xs - cx) < 30) & (np.abs(sk_ys - cy) < 30)
+        nx_pts, ny_pts = sk_xs[nearby], sk_ys[nearby]
+        if len(nx_pts) < 3:
+            continue
+        dx, dy = float(nx_pts[-1] - nx_pts[0]), float(ny_pts[-1] - ny_pts[0])
+        length = math.hypot(dx, dy)
+        if length < 1:
+            continue
+        tx, ty = dx / length, dy / length
+        nx_dir, ny_dir = -ty, tx
+        half_width = 0
+        for step in range(1, 200):
+            px, py = int(cx + nx_dir * step), int(cy + ny_dir * step)
+            if px < 0 or px >= w or py < 0 or py >= h or seg_mask[py, px] == 0:
+                half_width = step
+                break
+        if half_width < 9:
+            continue
+        arc_half = half_width - 4
+        p0 = (int(cx - nx_dir * arc_half), int(cy - ny_dir * arc_half))
+        p2 = (int(cx + nx_dir * arc_half), int(cy + ny_dir * arc_half))
+        sag = arc_half * 0.25 + random.uniform(-2, 2)
+        p1 = (int(cx + tx * sag), int(cy + ty * sag))
+        pts = _bezier_quadratic(p0, p1, p2, n_pts=14)
+        for i in range(len(pts) - 1):
+            cv2.line(arc_mask, pts[i], pts[i + 1], 255, thickness)
+    arc_mask = cv2.bitwise_and(arc_mask, seg_mask)
+    canvas[arc_mask > 0] = color_bgr
+    return canvas
 
 
 def _resample_closed_polyline(pts: np.ndarray, step: float) -> np.ndarray:
@@ -670,25 +872,8 @@ def draw_annotations(
         draw.text((lx, ly), text, font=font_sm, fill=color, **HALO)
         _draw_arrow(draw, (lx - 6, ly + 10), feat, color, width=2)
 
-    # ── Highlight: wobbly circle at centroid + label at right edge ───────────
-    h_pt = features.get("highlight")
-    if h_pt:
-        _draw_wobbly_circle(draw, h_pt, radius=18, color=color, width=2)
-        _hi_min = max(80, sketch_content_top + 8)
-        _right_label("Highlight", h_pt, min_y=_hi_min, max_y=H - 60)
-
-    # ── Shadow: label at left canvas edge, arrow points right ────────────────
-    s_pt = features.get("shadow")
-    if s_pt:
-        sx, sy = s_pt
-        lx = margin
-        ly = max(y_below_text + 8, min(H - 50, sy - 12))
-        draw.text((lx, ly), "Shadow", font=font_lg, fill=color, **HALO)
-        _draw_arrow(draw, (lx + 84, ly + 13), (sx, sy), color, width=2)
-
     # ── Text block (top-left): material, object/colour, keyword ──────────────
     y = margin
     for line in text_lines:
         draw.text((margin, y), line, font=font_sm, fill=color, **HALO)
         y += _line_h
-

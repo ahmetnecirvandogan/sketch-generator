@@ -33,6 +33,68 @@ except Exception:
 _hed_net = None
 
 
+def _simplify_structural_components(
+    edges: np.ndarray,
+    seg_mask: "np.ndarray | None" = None,
+) -> np.ndarray:
+    """
+    Keep only the strongest connected edge components so crowded knot regions
+    don't turn into texture. Upper-object detail is capped more aggressively
+    than the hanging body, which preserves long drape lines while trimming the
+    dense bundle of tiny parallel folds near the knot.
+    """
+    n_lbl, lbl, stats, centroids = cv2.connectedComponentsWithStats(edges, connectivity=8)
+    if n_lbl <= 1:
+        return edges
+
+    upper_cut = None
+    if seg_mask is not None:
+        ys, _ = np.where(seg_mask > 0)
+        if ys.size > 0:
+            y0 = int(ys.min())
+            y1 = int(ys.max())
+            upper_cut = y0 + 0.39 * max(1, (y1 - y0))
+
+    upper = []
+    lower = []
+    for lbl_id in range(1, n_lbl):
+        x, y, w, h, area = stats[lbl_id]
+        if area < 14:
+            continue
+        long_span = max(int(w), int(h))
+        short_span = min(int(w), int(h))
+        score = float(area) + 0.65 * float(long_span) - 0.20 * float(short_span)
+        if long_span >= 34:
+            score += 6.0
+        bucket = upper if (upper_cut is not None and centroids[lbl_id][1] < upper_cut) else lower
+        bucket.append((score, lbl_id, area, long_span))
+
+    keep: set[int] = set()
+    for bucket, cap, long_extra in ((upper, 6, 1), (lower, 9, 2)):
+        bucket.sort(reverse=True)
+        kept = 0
+        kept_long = 0
+        for score, lbl_id, area, long_span in bucket:
+            is_long = long_span >= 52 and area >= 18
+            if kept >= cap and not (is_long and kept_long < long_extra):
+                continue
+            if area < 20 and long_span < 28:
+                continue
+            keep.add(int(lbl_id))
+            if kept < cap:
+                kept += 1
+            elif is_long:
+                kept_long += 1
+
+    if not keep:
+        return edges
+
+    out = np.zeros_like(edges)
+    for lbl_id in keep:
+        out[lbl == lbl_id] = 255
+    return out
+
+
 def _load_hed():
     global _hed_net
     if _hed_net is not None:
@@ -105,16 +167,17 @@ def detect_edges(
         # kernel wipes those out while keeping the broad fold transitions.
         edge_acc = np.zeros((h, w), dtype=np.float32)
         for c in range(min(3, normals.shape[2])):
-            ch_smooth = cv2.GaussianBlur(normals[:, :, c], (7, 7), 1.5)
+            ch_smooth = cv2.GaussianBlur(normals[:, :, c], (11, 11), 3.0)
             gx = cv2.Sobel(ch_smooth, cv2.CV_32F, 1, 0, ksize=3)
             gy = cv2.Sobel(ch_smooth, cv2.CV_32F, 0, 1, ksize=3)
             edge_acc += gx ** 2 + gy ** 2
         edge_acc = np.sqrt(edge_acc)
         mx       = edge_acc.max()
         edge_u8  = (edge_acc / mx * 255).astype(np.uint8) if mx > 0 else np.zeros((h, w), np.uint8)
-        # Higher Canny thresholds (40 / 100) discard weak gradient noise and
-        # keep only the major fold / seam transitions.
-        edges    = cv2.Canny(edge_u8, 40, 100)
+        # Keep the dominant folds while allowing a little more structure than
+        # v9 so the cloth frame and turning volumes read more clearly.
+        edges    = cv2.Canny(edge_u8, 86, 210)
+        edges    = _simplify_structural_components(edges, seg_mask=seg_mask)
         print(f"[A] Normal-map edge detection active ({os.path.splitext(normal_path)[1]}, fold geometry only).")
 
     else:
