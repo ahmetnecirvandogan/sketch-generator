@@ -1,11 +1,5 @@
 # Generated dataset artifacts
-dataset/renders/
-dataset/depth/
-dataset/normals/
-dataset/masks/
-dataset/conditioning/
-dataset/textures/
-dataset/metadata.jsonl
+dataset/
 
 # Python cache / build artifacts
 __pycache__/
