@@ -1,10 +1,12 @@
 # Generated dataset artifacts
 dataset/
+*_debug.png
 
 # Python cache / build artifacts
 __pycache__/
 *.py[cod]
 *$py.class
+.ipynb_checkpoints/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

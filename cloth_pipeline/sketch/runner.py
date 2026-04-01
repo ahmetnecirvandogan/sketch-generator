@@ -28,18 +28,6 @@ def _material_label_from_meta(meta: dict) -> str:
     return "Wool"
 
 
-def _albedo_rel_from_meta(meta: dict) -> str | None:
-    rel = meta.get("albedo_map") or meta.get("texture_file")
-    return rel if rel else None
-
-
-def _albedo_tiling_from_meta(meta: dict) -> tuple[float, float] | None:
-    raw = meta.get("albedo_tiling") or meta.get("texture_tiling")
-    if isinstance(raw, (list, tuple)) and len(raw) >= 2:
-        return (float(raw[0]), float(raw[1]))
-    return None
-
-
 def _pattern_name_from_meta(meta: dict) -> str | None:
     return meta.get("pattern_name") or meta.get("texture_pattern")
 
@@ -73,25 +61,25 @@ def run_from_metadata(*, output_dir: str | None = None) -> None:
         material_label = _material_label_from_meta(meta)
         obj_name = "Wool Scarf" if "wool" in raw_text.lower() else "Cloth"
 
-        tex_rel = _albedo_rel_from_meta(meta)
-        albedo_map_path = (
-            os.path.join(DATASET_DIR, tex_rel) if tex_rel else None
-        )
         mask_rel = meta.get("mask_image")
         alpha_mask_path = (
             os.path.join(DATASET_DIR, mask_rel) if mask_rel else None
         )
 
         try:
+            co = meta.get("cam_origin")
+            ct = meta.get("cam_target")
+            fov = float(meta.get("fov_deg", 40.0))
             sketch = generate_sketch(
                 render_path,
                 obj_name,
                 material_label,
                 keyword,
                 alpha_mask_path=alpha_mask_path,
-                albedo_map_path=albedo_map_path,
-                albedo_tiling=_albedo_tiling_from_meta(meta),
                 pattern_name=_pattern_name_from_meta(meta),
+                cam_origin=co if isinstance(co, (list, tuple)) and len(co) >= 3 else None,
+                cam_target=ct if isinstance(ct, (list, tuple)) and len(ct) >= 3 else None,
+                fov_deg=fov,
             )
             cv2.imwrite(out_path, sketch)
             print(f"  [{frame_str}] ✓  → {out_path}")

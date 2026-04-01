@@ -6,28 +6,78 @@ import random
 import cv2
 import numpy as np
 
+from cloth_pipeline.sketch.tones import smooth_lighting_luma
+
 def compute_shadow_mask(
     img_bgr:    np.ndarray,
     seg_mask:   np.ndarray,
-    percentile: float = 25.0,
+    percentile: float = 18.0,
 ) -> np.ndarray:
     """
-    Pixels whose luminance is below the *percentile*-th value of all object
-    pixels are marked as shadow.  The threshold self-calibrates to each
-    render's unique lighting.
+    Shadow mask from low-frequency lighting, not raw albedo texture.
+
+    Pixels whose smoothed luminance is below the *percentile*-th value over
+    object pixels are marked as shadow.
     """
-    gray          = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-    object_pixels = gray[seg_mask > 0]
+    luma = smooth_lighting_luma(img_bgr, seg_mask)
+    object_pixels = luma[seg_mask > 0]
     if object_pixels.size == 0:
-        return np.zeros_like(gray, dtype=np.uint8)
+        return np.zeros_like(luma, dtype=np.uint8)
 
     thresh = float(np.percentile(object_pixels, percentile))
-    shadow = ((gray <= thresh).astype(np.uint8) * 255)
+    p25 = float(np.percentile(object_pixels, 25))
+    p50 = float(np.percentile(object_pixels, 50))
+    p75 = float(np.percentile(object_pixels, 75))
+    iqr = max(1.0, p75 - p25)
+
+    # Local-darkness response: keeps pockets that are darker than nearby cloth.
+    # This suppresses broad tonal drift (e.g. lower garment gently darker overall).
+    h, w = luma.shape[:2]
+    k = int(round(min(h, w) * 0.12))
+    k = max(25, min(91, k))
+    if k % 2 == 0:
+        k += 1
+    trend = cv2.GaussianBlur(luma, (k, k), 0).astype(np.float32)
+    response = trend - luma.astype(np.float32)
+    resp_vals = response[seg_mask > 0]
+    resp_thresh = float(np.percentile(resp_vals, 84)) if resp_vals.size > 0 else 0.0
+
+    # Reject weak tonal drift so only clearly visible camera-facing shadows get '#'.
+    min_drop = max(12.0, 1.0 * iqr)
+    shadow_bool = (
+        (luma <= thresh)
+        & ((p50 - luma.astype(np.float32)) >= min_drop)
+        & (response >= resp_thresh)
+    )
+    shadow = (shadow_bool.astype(np.uint8) * 255)
     shadow = cv2.bitwise_and(shadow, seg_mask)
     shadow = cv2.morphologyEx(shadow, cv2.MORPH_OPEN,  np.ones((3, 3), np.uint8))
     # 5×5 close links nearby shadow without swallowing the whole garment when
     # luminance is compressed (e.g. translucent chiffon, narrow histogram).
     shadow = cv2.morphologyEx(shadow, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+
+    # Remove tiny speckles that become stray '#' markers.
+    n, lbl, stats, _ = cv2.connectedComponentsWithStats(shadow)
+    if n > 1:
+        min_area = max(16, int(round(0.0018 * int((seg_mask > 0).sum()))))
+        ys_obj = np.where(seg_mask > 0)[0]
+        y_bottom_gate = float(np.percentile(ys_obj, 68)) if ys_obj.size > 0 else float(h * 0.68)
+        strong_resp = float(np.percentile(resp_vals, 93)) if resp_vals.size > 0 else resp_thresh
+        keep = np.zeros_like(shadow, dtype=np.uint8)
+        for i in range(1, n):
+            area_i = int(stats[i, cv2.CC_STAT_AREA])
+            if area_i < min_area:
+                continue
+            cx_i = float(stats[i, cv2.CC_STAT_LEFT] + 0.5 * stats[i, cv2.CC_STAT_WIDTH])
+            cy_i = float(stats[i, cv2.CC_STAT_TOP] + 0.5 * stats[i, cv2.CC_STAT_HEIGHT])
+            comp = lbl == i
+            mean_resp = float(response[comp].mean()) if np.any(comp) else 0.0
+            # Lower-tail shadows are accepted only when they have strong local contrast.
+            if cy_i >= y_bottom_gate and mean_resp < strong_resp:
+                continue
+            _ = cx_i  # keeps explicit geometry vars for readability/debugging
+            keep[comp] = 255
+        shadow = keep
     return shadow
 
 

@@ -563,8 +563,7 @@ def draw_material_marks(
 ) -> None:
     """
     Mid-tone marks that vary by **BRDF fabric preset** (wool, linen, …).
-    Albedo *pattern* (stripes, checks) stays in ``albedo_pattern_stroke_mask``;
-    this channel reads as *material handle* in the sketch language.
+    These marks encode fabric feel (material handle) in the sketch language.
     """
     key = normalize_material_type(material_type, material_label)
     cap = _MATERIAL_MARK_CAP.get(key, _MATERIAL_MARK_CAP["default"])
@@ -606,96 +605,67 @@ def draw_fabric_stipple(
     )
 
 
-def albedo_pattern_stroke_mask(
-    tex_bgr: np.ndarray,
-    out_h: int,
-    out_w: int,
-    tile_u: float,
-    tile_v: float,
-    interior_mask: np.ndarray,
-    pattern_name: Optional[str] = None,
+# ─────────────────────────────────────────────────────────────────────────────
+# Highlight / shadow region markers  (ASCII on canvas before padding & scale)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Same fontScale yields identical bbox height for ``*`` and ``#``, but ``*`` is
+# narrower and reads smaller; bump it so both markers feel the same size.
+_ASTERISK_VISUAL_SCALE = 1.25
+
+
+def draw_region_markers(
+    canvas:           np.ndarray,
+    mask:             np.ndarray,
+    marker:           str,
+    color_bgr:        tuple,
+    *,
+    step:             int   = 26,
+    marker_height_px: float = 14.0,
+    thickness:        int   = 1,
 ) -> np.ndarray:
     """
-    Tile the procedural *albedo map* across the frame (scale from ``albedo_tiling``)
-    and extract sparse boundary strokes so conditioning matches Mitsuba ``base_color``
-    pattern identity, independent of lighting.
+    Draw a single-character label on a coarse grid over ``mask`` pixels so each
+    spatial cell gets at most one marker (avoids solid fills on large regions).
+
+    ``marker_height_px`` is the target cap height in pixels (from unit-scale
+    metrics). ``*`` is scaled up slightly so it matches ``#`` visually.
     """
-    if pattern_name and pattern_name.lower() == "solid":
-        return np.zeros((out_h, out_w), dtype=np.uint8)
-    if tex_bgr is None or tex_bgr.size == 0:
-        return np.zeros((out_h, out_w), dtype=np.uint8)
-    if interior_mask.shape[:2] != (out_h, out_w):
-        raise ValueError("interior_mask must match (out_h, out_w)")
+    if mask is None or mask.size == 0:
+        return canvas
+    ys, xs = np.where(mask > 0)
+    if ys.size == 0:
+        return canvas
 
-    th, tw = tex_bgr.shape[:2]
-    if th < 2 or tw < 2:
-        return np.zeros((out_h, out_w), dtype=np.uint8)
+    buckets: dict[tuple[int, int], tuple[int, int]] = {}
+    for y, x in zip(ys, xs):
+        key = (x // step, y // step)
+        if key not in buckets:
+            buckets[key] = (x, y)
 
-    # Map renderer UV tiling to ~2–16 repeats across the image (no UV span in metadata).
-    rep = (float(tile_u) + float(tile_v)) * 1.2
-    rep = float(np.clip(rep, 2.0, 16.0))
-    cell_w = max(4, int(round(out_w / rep)))
-    aspect = th / float(tw)
-    cell_h = max(4, int(round(cell_w * aspect)))
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    (_, ref_h), _ = cv2.getTextSize(marker, font, 1.0, thickness)
+    font_scale = (
+        marker_height_px / float(ref_h) if ref_h > 0 else 0.62
+    )
+    if marker == "*":
+        font_scale *= _ASTERISK_VISUAL_SCALE
 
-    small = cv2.resize(tex_bgr, (cell_w, cell_h), interpolation=cv2.INTER_AREA)
-    yh, xw = small.shape[:2]
-    ny = max(1, (out_h + yh - 1) // yh)
-    nx = max(1, (out_w + xw - 1) // xw)
-    mosaic = np.tile(small, (ny, nx, 1))[:out_h, :out_w].copy()
-
-    gray = cv2.cvtColor(mosaic, cv2.COLOR_BGR2GRAY)
-    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
-    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
-    mag = np.sqrt(gx * gx + gy * gy)
-
-    m = interior_mask > 0
-    if not np.any(m):
-        return np.zeros((out_h, out_w), dtype=np.uint8)
-    vals = mag[m]
-    if vals.size == 0 or float(np.std(vals)) < 0.35:
-        return np.zeros((out_h, out_w), dtype=np.uint8)
-
-    interior_px = int(np.count_nonzero(m))
-    # Stripes / checks often yield high Sobel magnitude on most interior pixels at a
-    # fixed percentile (e.g. 86), which reads as a solid fill.  Raise the cutoff
-    # until only a sparse fraction of the eroded interior is ink (~pattern edges).
-    #
-    # Measure coverage *before* MORPH_OPEN: a 2×2 open can delete legitimate thin
-    # strokes; using opened coverage caused us to return an empty mask when
-    # ``0 <= max_frac`` (early exit) and broke sparse patterns like wide stripes.
-    max_interior_frac = 0.34
-    k2 = np.ones((2, 2), np.uint8)
-    chosen = np.zeros((out_h, out_w), dtype=np.uint8)
-    for pct in (86, 90, 93, 96, 98, 99.0, 99.5, 99.8):
-        thr = float(np.percentile(vals, pct))
-        raw_bin = ((mag >= thr).astype(np.uint8) * 255)
-        raw_bin = cv2.bitwise_and(raw_bin, interior_mask)
-        cov = int(np.count_nonzero(raw_bin > 0))
-        if interior_px <= 0:
-            return chosen
-        frac = cov / interior_px
-        chosen = raw_bin
-        if cov > 0 and frac <= max_interior_frac:
-            break
-
-    cov_final = int(np.count_nonzero(chosen > 0))
-    if cov_final == 0:
-        return np.zeros((out_h, out_w), dtype=np.uint8)
-    if cov_final / interior_px > max_interior_frac:
-        # Strong ties / saturated gradients: keep only the strongest magnitudes.
-        ys_i, xs_i = np.where(interior_mask > 0)
-        vm = mag[ys_i, xs_i]
-        k = max(50, int(interior_px * max_interior_frac))
-        k = min(k, vm.size)
-        pick = np.argpartition(-vm, k - 1)[:k]
-        chosen = np.zeros((out_h, out_w), dtype=np.uint8)
-        chosen[ys_i[pick], xs_i[pick]] = 255
-
-    opened = cv2.morphologyEx(chosen, cv2.MORPH_OPEN, k2)
-    if int(np.count_nonzero(opened > 0)) == 0:
-        return chosen
-    return opened
+    for x, y in buckets.values():
+        (tw, th), _ = cv2.getTextSize(marker, font, font_scale, thickness)
+        org_x = int(x - tw / 2)
+        org_y = int(y + th / 2)
+        cv2.putText(
+            canvas,
+            marker,
+            (org_x, org_y),
+            font,
+            font_scale,
+            color_bgr,
+            thickness,
+            cv2.LINE_AA,
+        )
+    return canvas
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -832,13 +802,11 @@ def draw_annotations(
       • Text block       (top-left, font 18): material, object + colour, keyword.
       • "Segmentation    (top-centre, font 18): arrow pointing to the top of
         Mask"             the dashed rectangular boundary.
-      • "Highlight"      (font 18): small outlined circle at the highlight
-                         centroid + label at right canvas edge.
-      • "Shadow"         (font 22): label at left canvas edge, arrow to the
-                         hatched shadow zone.
+      • Highlight / shadow are marked on the garment raster with ``*`` and ``#``
+        (see ``draw_region_markers`` in the pipeline), not as separate arrow labels.
 
     ``sketch_content_top`` — y coordinate where the sketch raster begins; keeps
-    the Highlight label from being pulled up into the reserved text band.
+    captions aligned when the layout reserves a top band.
     """
     W, H    = canvas_wh
     margin  = 18

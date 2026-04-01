@@ -3,6 +3,55 @@
 import cv2
 import numpy as np
 
+from cloth_pipeline.sketch.tones import smooth_lighting_luma
+
+
+def highlight_region_mask(
+    img_bgr: np.ndarray,
+    seg_mask: np.ndarray,
+    *,
+    keep_largest: bool = True,
+    percentile: float = 90.0,
+    min_rise_scale: float = 0.75,
+    min_area_frac: float = 0.0015,
+) -> np.ndarray:
+    """
+    Binary mask of the main highlight from low-frequency lighting.
+
+    Uses smoothed luminance so texture pattern does not create fake highlights.
+    By default returns only the largest connected region. For marker placement,
+    set ``keep_largest=False`` to keep multiple visible bright regions.
+    """
+    luma = smooth_lighting_luma(img_bgr, seg_mask)
+    pixels = luma[seg_mask > 0]
+    if len(pixels) == 0:
+        return np.zeros_like(seg_mask, dtype=np.uint8)
+
+    p90 = float(np.percentile(pixels, percentile))
+    p25 = float(np.percentile(pixels, 25))
+    p50 = float(np.percentile(pixels, 50))
+    p75 = float(np.percentile(pixels, 75))
+    iqr = max(1.0, p75 - p25)
+    # Keep only clearly bright regions (camera-visible highlights), not mild
+    # albedo variation that survives smoothing.
+    min_rise = max(8.0, float(min_rise_scale) * iqr)
+    bright_bool = (luma >= p90) & ((luma.astype(np.float32) - p50) >= min_rise)
+    bright = cv2.bitwise_and((bright_bool.astype(np.uint8) * 255), seg_mask)
+    n, lbl, stats, _ = cv2.connectedComponentsWithStats(bright)
+    if n <= 1:
+        return bright
+    if keep_largest:
+        biggest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+        return ((lbl == biggest).astype(np.uint8) * 255)
+
+    out = np.zeros_like(bright, dtype=np.uint8)
+    min_area = max(12, int(round(float(min_area_frac) * int((seg_mask > 0).sum()))))
+    for i in range(1, n):
+        if int(stats[i, cv2.CC_STAT_AREA]) >= min_area:
+            out[lbl == i] = 255
+    return out
+
+
 def find_feature_points(
     img_bgr:  np.ndarray,
     seg_mask: np.ndarray,
@@ -26,8 +75,6 @@ def find_feature_points(
     p20 = float(np.percentile(pixels, 20))
     p40 = float(np.percentile(pixels, 40))
     p60 = float(np.percentile(pixels, 60))
-    p90 = float(np.percentile(pixels, 90))
-
     def _masked(lo, hi):
         m = cv2.bitwise_and(
             (gray >= lo).astype(np.uint8) * 255,
@@ -41,16 +88,8 @@ def find_feature_points(
             return None
         return int(np.mean(xs)), int(np.mean(ys))
 
-    def _largest_component(m):
-        """Keep only the biggest connected blob to discard scattered outliers."""
-        n, lbl, stats, _ = cv2.connectedComponentsWithStats(m)
-        if n <= 1:
-            return m
-        biggest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
-        return ((lbl == biggest).astype(np.uint8) * 255)
-
     return {
-        "highlight": _centroid(_largest_component(_masked(p90, 255))),
+        "highlight": _centroid(highlight_region_mask(img_bgr, seg_mask)),
         "midtone":   _centroid(_masked(p40, p60)),
         "shadow":    _centroid(_masked(0,   p20)),   # overridden in generate_sketch
     }

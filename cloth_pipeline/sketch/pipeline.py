@@ -9,18 +9,20 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from cloth_pipeline.paths import DATASET_DIR
-from cloth_pipeline.sketch.constants import SKETCH_BGR, SKETCH_RGB, USE_TEXTURE_STROKES
+from cloth_pipeline.sketch.constants import SKETCH_BGR, SKETCH_RGB
 from cloth_pipeline.sketch.drawing import (
-    albedo_pattern_stroke_mask,
     draw_annotations,
     draw_depth_layer_boundary,
     draw_occlusion_edges,
+    draw_region_markers,
     draw_wobbly_contour,
     measure_top_left_text_pad,
 )
 from cloth_pipeline.sketch.edges import detect_edges
-from cloth_pipeline.sketch.features import detect_dominant_color
+from cloth_pipeline.sketch.features import detect_dominant_color, highlight_region_mask
+from cloth_pipeline.sketch.shadows import compute_shadow_mask
 from cloth_pipeline.sketch.segmentation import get_object_mask
+from cloth_pipeline.sketch.visibility import visibility_mask_u8
 
 
 def _nonwhite_bbox(img_bgr: np.ndarray, threshold: int = 250) -> tuple[int, int, int, int] | None:
@@ -85,22 +87,26 @@ def generate_sketch(
     keyword:        str,
     *,
     alpha_mask_path: str | None = None,
-    albedo_map_path: str | None = None,
-    albedo_tiling:   tuple[float, float] | None = None,
     pattern_name:    str | None = None,
+    cam_origin:      list | tuple | None = None,
+    cam_target:      list | tuple | None = None,
+    fov_deg:         float = 40.0,
 ) -> np.ndarray:
     """
     Full render → conditioning sketch pipeline.
 
-    When ``albedo_map_path`` / ``albedo_tiling`` / ``pattern_name`` are set (from
-    dataset metadata), the same procedural albedo PNG used for Mitsuba ``base_color``
-    is tiled and converted to sparse in-mask strokes so pattern is separate from
-    lighting-dependent structure in the RGB render.
+    ``pattern_name`` (from metadata) is used for the top-left ``Texture: ...``
+    caption line.
 
     Fabric preset is written in the top-left text block (``material_label``), not
     as strokes on the cloth. The output canvas adds equal padding on opposite sides
     (right = left, bottom = top) so the ``w×h`` sketch stays **centred** like the
     source render, while the top-left quadrant stays clear for captions.
+
+    When ``cam_origin`` / ``cam_target`` are set (Stage-1 metadata), highlight and
+    shadow markers are restricted to pixels whose shading normal faces the camera,
+    using depth + normals AOVs so back-facing cloth and off-screen shading do not
+    receive ``*`` / ``#``.
 
     Returns a BGR uint8 image ready for cv2.imwrite.
     """
@@ -117,22 +123,38 @@ def generate_sketch(
         img_bgr = img_raw                    # legacy RGB-only render
         alpha   = None
 
+    _base_name = os.path.basename(render_path)
+    _frame_str = os.path.splitext(_base_name)[0].split("_")[-1]
+
     # Prefer dedicated Stage-1 mask when present (independent of render alpha).
     if alpha_mask_path and os.path.isfile(alpha_mask_path):
         alpha_mask = cv2.imread(alpha_mask_path, cv2.IMREAD_GRAYSCALE)
         if alpha_mask is not None and alpha_mask.shape[:2] == img_bgr.shape[:2]:
             alpha = alpha_mask
 
+    # Composited beauty PNGs use opaque alpha everywhere; load ``masks/mask_*.png``
+    # so segmentation (and camera-facing tests) match real cloth coverage.
+    if alpha is not None and int(alpha.min()) == 255 and int(alpha.max()) == 255:
+        auto_mask_path = os.path.join(DATASET_DIR, "masks", f"mask_{_frame_str}.png")
+        if os.path.isfile(auto_mask_path):
+            am = cv2.imread(auto_mask_path, cv2.IMREAD_GRAYSCALE)
+            if am is not None and am.shape[:2] == img_bgr.shape[:2]:
+                alpha = am
+
     h, w = img_bgr.shape[:2]
 
-    # Derive companion data paths from frame string.
-    _base_name  = os.path.basename(render_path)
-    _frame_str  = os.path.splitext(_base_name)[0].split("_")[-1]
+    # Companion AOV paths (same frame id as ``render_{id}.png``).
     _norm_base  = os.path.join(DATASET_DIR, "normals", f"normals_{_frame_str}")
     normal_path = (
         _norm_base + ".png"
         if os.path.exists(_norm_base + ".png")
         else _norm_base + ".npy"
+    )
+    # Float ``.npy`` preferred for view-dependent shading (``sh_normal`` AOV).
+    normals_path_world = (
+        _norm_base + ".npy"
+        if os.path.exists(_norm_base + ".npy")
+        else _norm_base + ".png"
     )
     depth_path = os.path.join(DATASET_DIR, "depth", f"depth_{_frame_str}.npy")
 
@@ -154,20 +176,6 @@ def generate_sketch(
     interior_for_edges = cv2.erode(seg_mask, _k, iterations=1)
     edges = cv2.bitwise_and(edges, interior_for_edges)
     canvas[edges > 0] = SKETCH_BGR
-
-    # ── A−: Optional albedo pattern strokes ───────────────────────────────────
-    # Disabled by default to avoid tiled/grid artifacts in conditioning sketches.
-    if USE_TEXTURE_STROKES and albedo_map_path and os.path.isfile(albedo_map_path):
-        tex_bgr = cv2.imread(albedo_map_path, cv2.IMREAD_COLOR)
-        if tex_bgr is not None:
-            tu, tv = 4.0, 4.0
-            if albedo_tiling is not None and len(albedo_tiling) >= 2:
-                tu = float(albedo_tiling[0])
-                tv = float(albedo_tiling[1])
-            albedo_pat = albedo_pattern_stroke_mask(
-                tex_bgr, h, w, tu, tv, interior_for_edges, pattern_name
-            )
-            canvas[albedo_pat > 0] = SKETCH_BGR
 
     # ── A+: Depth-aware occlusion emphasis (regional threshold) ──────────────
     canvas = draw_occlusion_edges(canvas, seg_mask, depth_path, SKETCH_BGR, thickness=1)
@@ -200,6 +208,46 @@ def generate_sketch(
                     base_thickness=1.0, wobble_amp=0.8, wobble_freq=2,
                 )
 
+    # ── Highlight (*) and shadow (#) markers on the garment ───────────────────
+    _hl = highlight_region_mask(
+        img_bgr,
+        seg_mask,
+        keep_largest=False,
+        percentile=88.0,
+        min_rise_scale=0.55,
+        min_area_frac=0.0010,
+    )
+    _sh = compute_shadow_mask(img_bgr, seg_mask)
+    if (
+        cam_origin is not None
+        and cam_target is not None
+        and len(cam_origin) >= 3
+        and len(cam_target) >= 3
+    ):
+        vis = visibility_mask_u8(
+            normals_path_world,
+            depth_path,
+            cam_origin,
+            cam_target,
+            float(fov_deg),
+            h,
+            w,
+            seg_mask=seg_mask,
+        )
+        if vis is not None:
+            _hl = cv2.bitwise_and(_hl, vis)
+            _sh = cv2.bitwise_and(_sh, vis)
+    canvas = draw_region_markers(canvas, _sh, "#", SKETCH_BGR)
+    canvas = draw_region_markers(
+        canvas,
+        _hl,
+        "*",
+        SKETCH_BGR,
+        step=22,
+        marker_height_px=14.0,
+        thickness=1,
+    )
+
     # ── Colour detection for text ─────────────────────────────────────────────
     dominant_color = detect_dominant_color(img_bgr, seg_mask)
 
@@ -210,10 +258,11 @@ def generate_sketch(
         .strip()
     )
     short_name = obj_name.replace("Wool ", "").replace("wool ", "")
+    texture_label = (pattern_name or keyword or "").strip()
     text_lines = [
         f"Material: {mat_display}",
         f"Object: {short_name} ({dominant_color})",
-        f"Key word: {keyword}",
+        f"Texture: {texture_label}",
     ]
     pad_left, pad_top = measure_top_left_text_pad(text_lines)
     # Keep a generous text band at top-left, but trim the opposite margins so
