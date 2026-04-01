@@ -60,14 +60,12 @@ python generate_sketches.py
 
 Requires `dataset/metadata.jsonl` and the render paths it references (normally after Stage 1). Existing `conditioning_*.png` files are skipped.
 
-### Sketch options
+### Sketch notes
 
-Texture/pattern strokes are disabled by default to avoid grid artifacts in conditioning sketches.
-
-- Enable with full variable name:
-  - `USE_TEXTURE_STROKES=true python generate_sketches.py`
-- Or use the short alias:
-  - `UTS=1 python generate_sketches.py`
+Texture overlay strokes are no longer part of Stage 2 sketch generation.
+Sketches now keep structural linework plus lighting markers (`#` for shadow,
+`*` for highlight), and the texture identity is provided by the caption line
+(`Texture: ...`) from metadata.
 
 ## Mitsuba note
 

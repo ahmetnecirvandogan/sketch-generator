@@ -1,16 +1,12 @@
 # Generated dataset artifacts
-dataset/renders/
-dataset/depth/
-dataset/normals/
-dataset/masks/
-dataset/conditioning/
-dataset/textures/
-dataset/metadata.jsonl
+dataset/
+*_debug.png
 
 # Python cache / build artifacts
 __pycache__/
 *.py[cod]
 *$py.class
+.ipynb_checkpoints/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
