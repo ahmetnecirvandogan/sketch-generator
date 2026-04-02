@@ -24,7 +24,7 @@ from cloth_pipeline.paths import (
 mi.set_variant("scalar_rgb")
 
 
-def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
+def run_generation(num_samples: int = 50) -> None:  # bump for full training runs
     ensure_dataset_stage_dirs()
 
     mesh_files = sorted(glob.glob(os.path.join(MESHES_DIR, "*.obj")))

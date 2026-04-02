@@ -103,10 +103,10 @@ def generate_sketch(
     (right = left, bottom = top) so the ``w×h`` sketch stays **centred** like the
     source render, while the top-left quadrant stays clear for captions.
 
-    When ``cam_origin`` / ``cam_target`` are set (Stage-1 metadata), highlight and
-    shadow markers are restricted to pixels whose shading normal faces the camera,
-    using depth + normals AOVs so back-facing cloth and off-screen shading do not
-    receive ``*`` / ``#``.
+    When ``cam_origin`` / ``cam_target`` are set (Stage-1 metadata), **highlight**
+    markers (``*``) are restricted to camera-facing cloth via depth + normals AOVs.
+    **Shadow** markers (``#``) stay image-based so large shaded folds and occluded
+    interiors (often back-facing in ``sh_normal``) still receive ``#``.
 
     Returns a BGR uint8 image ready for cv2.imwrite.
     """
@@ -218,6 +218,8 @@ def generate_sketch(
         min_area_frac=0.0010,
     )
     _sh = compute_shadow_mask(img_bgr, seg_mask)
+    # Do not place '#' where we already mark a highlight '*'.
+    _sh = cv2.bitwise_and(_sh, cv2.bitwise_not(_hl))
     if (
         cam_origin is not None
         and cam_target is not None
@@ -235,16 +237,27 @@ def generate_sketch(
             seg_mask=seg_mask,
         )
         if vis is not None:
-            _hl = cv2.bitwise_and(_hl, vis)
-            _sh = cv2.bitwise_and(_sh, vis)
-    canvas = draw_region_markers(canvas, _sh, "#", SKETCH_BGR)
+            hl_vis = cv2.bitwise_and(_hl, vis)
+            obj_n = int((seg_mask > 0).sum())
+            # ``sh_normal`` vs our camera basis often rejects grazing highlights on
+            # leather rims; if gating wipes almost all ``*``, keep image-based hl.
+            if obj_n > 0 and np.count_nonzero(hl_vis) >= max(
+                120, int(0.007 * obj_n)
+            ):
+                _hl = hl_vis
+    # Larger step → fewer '#' / '*' per region (shared grid).
+    _mark_step = 68
+    _mark_h = 13.0
+    canvas = draw_region_markers(
+        canvas, _sh, "#", SKETCH_BGR, step=_mark_step, marker_height_px=_mark_h
+    )
     canvas = draw_region_markers(
         canvas,
         _hl,
         "*",
         SKETCH_BGR,
-        step=22,
-        marker_height_px=14.0,
+        step=_mark_step,
+        marker_height_px=_mark_h,
         thickness=1,
     )
 

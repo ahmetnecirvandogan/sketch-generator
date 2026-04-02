@@ -37,6 +37,23 @@ def highlight_region_mask(
     min_rise = max(8.0, float(min_rise_scale) * iqr)
     bright_bool = (luma >= p90) & ((luma.astype(np.float32) - p50) >= min_rise)
     bright = cv2.bitwise_and((bright_bool.astype(np.uint8) * 255), seg_mask)
+
+    obj_count = int((seg_mask > 0).sum())
+    # When the lit shell is bright but histogram compression hides p90 tails,
+    # union a milder upper-quantile band (still above median + k·IQR).
+    if obj_count > 0 and np.count_nonzero(bright) < max(80, int(0.012 * obj_count)):
+        p_relax = max(72.0, percentile - 12.0)
+        pr = float(np.percentile(pixels, p_relax))
+        min_rise2 = max(4.5, 0.38 * iqr)
+        extra = (
+            (luma >= pr)
+            & ((luma.astype(np.float32) - p50) >= min_rise2)
+            & (seg_mask > 0)
+        )
+        bright = cv2.bitwise_or(
+            bright, (extra.astype(np.uint8) * 255)
+        )
+
     n, lbl, stats, _ = cv2.connectedComponentsWithStats(bright)
     if n <= 1:
         return bright
@@ -101,10 +118,28 @@ def find_feature_points(
 
 def detect_dominant_color(img_bgr: np.ndarray, seg_mask: np.ndarray) -> str:
     """
-    Returns a human-readable colour name (e.g. "Pink", "Blue") from the
-    mean BGR value of pixels inside the segmentation mask.
+    Returns a human-readable colour name (e.g. "Pink", "Blue") from mean BGR
+    on **lit** cloth pixels. Deep shadow pixels are ignored so a green/white
+    checkerboard with large black folded regions is not labelled "Black".
     """
-    pixels = img_bgr[seg_mask > 0]
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    obj = seg_mask > 0
+    vals = gray[obj]
+    if vals.size == 0:
+        return ""
+
+    # Drop the darkest majority (fold shadow) so mean hue reflects albedo.
+    # Use strict > so a huge ``luma==0`` plateau is excluded when p55==0.
+    thr = float(np.percentile(vals, 55.0))
+    sel = obj & (gray > thr)
+    min_keep = max(64, int(round(0.02 * float(vals.size))))
+    if np.count_nonzero(sel) < min_keep:
+        thr = float(np.percentile(vals, 40.0))
+        sel = obj & (gray > thr)
+    if np.count_nonzero(sel) < max(32, int(round(0.01 * float(vals.size)))):
+        sel = obj
+
+    pixels = img_bgr[sel]
     if len(pixels) == 0:
         return ""
 

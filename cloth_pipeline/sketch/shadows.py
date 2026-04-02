@@ -16,8 +16,10 @@ def compute_shadow_mask(
     """
     Shadow mask from low-frequency lighting, not raw albedo texture.
 
-    Pixels whose smoothed luminance is below the *percentile*-th value over
-    object pixels are marked as shadow.
+    Combines (1) **local-contrast** pockets (creases) and (2) **broad** dark
+    regions. The latter is essential for leather / dark fabrics where a whole
+    folded interior is uniformly dark: ``trend - luma`` is near zero there, so
+    crease-only logic would skip almost every shadow pixel.
     """
     luma = smooth_lighting_luma(img_bgr, seg_mask)
     object_pixels = luma[seg_mask > 0]
@@ -30,8 +32,7 @@ def compute_shadow_mask(
     p75 = float(np.percentile(object_pixels, 75))
     iqr = max(1.0, p75 - p25)
 
-    # Local-darkness response: keeps pockets that are darker than nearby cloth.
-    # This suppresses broad tonal drift (e.g. lower garment gently darker overall).
+    # Local-darkness response: pockets darker than a very smooth regional trend.
     h, w = luma.shape[:2]
     k = int(round(min(h, w) * 0.12))
     k = max(25, min(91, k))
@@ -40,43 +41,59 @@ def compute_shadow_mask(
     trend = cv2.GaussianBlur(luma, (k, k), 0).astype(np.float32)
     response = trend - luma.astype(np.float32)
     resp_vals = response[seg_mask > 0]
-    resp_thresh = float(np.percentile(resp_vals, 84)) if resp_vals.size > 0 else 0.0
+    resp_thresh = float(np.percentile(resp_vals, 78)) if resp_vals.size > 0 else 0.0
 
-    # Reject weak tonal drift so only clearly visible camera-facing shadows get '#'.
-    min_drop = max(12.0, 1.0 * iqr)
-    shadow_bool = (
+    min_drop = max(8.5, 0.85 * iqr)
+    crease_shadow = (
         (luma <= thresh)
         & ((p50 - luma.astype(np.float32)) >= min_drop)
         & (response >= resp_thresh)
     )
+
+    # Broad shadow: darker than the lit shell, without requiring local contrast.
+    # When p50≈0 (many black pixels after smoothing) or IQR≪global range,
+    # "below median" is degenerate — use separation from the upper brightness tail
+    # instead (dark cloth + bright rim highlights).
+    lmin = float(object_pixels.min())
+    lmax = float(object_pixels.max())
+    span = max(1.0, lmax - lmin)
+    p75 = float(np.percentile(object_pixels, 75.0))
+    p90 = float(np.percentile(object_pixels, 90.0))
+    broad_median = (
+        (luma <= float(np.percentile(object_pixels, min(44.0, percentile + 24.0))))
+        & (luma.astype(np.float32) < p50 - max(5.0, 0.2 * iqr))
+    )
+    # Strong highlight knee (dark cloth + bright rim): smoothed luma stays near zero
+    # for most pixels then jumps — p86 alone sits inside the plateau and marks
+    # almost the whole garment.  Split between p75 and p90 instead.
+    knee = p90 - p75
+    if knee > 28.0:
+        # Lower split → more '#' in fold ramps between dark mass and lit rim.
+        split = p75 + 0.32 * knee
+        broad_bimodal = (luma.astype(np.float32) < split) & (seg_mask > 0)
+    else:
+        p_hi_lit = float(np.percentile(object_pixels, 86.0))
+        gap = max(10.0, 0.06 * span, 0.45 * max(iqr, 1.0))
+        broad_bimodal = (luma.astype(np.float32) < p_hi_lit - gap) & (seg_mask > 0)
+    if p50 < 22.0 or iqr < 0.07 * span:
+        broad_shadow = broad_bimodal
+    else:
+        broad_shadow = broad_median | broad_bimodal
+
+    shadow_bool = crease_shadow | broad_shadow
     shadow = (shadow_bool.astype(np.uint8) * 255)
     shadow = cv2.bitwise_and(shadow, seg_mask)
     shadow = cv2.morphologyEx(shadow, cv2.MORPH_OPEN,  np.ones((3, 3), np.uint8))
-    # 5×5 close links nearby shadow without swallowing the whole garment when
-    # luminance is compressed (e.g. translucent chiffon, narrow histogram).
     shadow = cv2.morphologyEx(shadow, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
 
-    # Remove tiny speckles that become stray '#' markers.
+    # Drop only tiny speckles (no vertical gating — lower-half folds matter).
     n, lbl, stats, _ = cv2.connectedComponentsWithStats(shadow)
     if n > 1:
-        min_area = max(16, int(round(0.0018 * int((seg_mask > 0).sum()))))
-        ys_obj = np.where(seg_mask > 0)[0]
-        y_bottom_gate = float(np.percentile(ys_obj, 68)) if ys_obj.size > 0 else float(h * 0.68)
-        strong_resp = float(np.percentile(resp_vals, 93)) if resp_vals.size > 0 else resp_thresh
+        min_area = max(12, int(round(0.0012 * int((seg_mask > 0).sum()))))
         keep = np.zeros_like(shadow, dtype=np.uint8)
         for i in range(1, n):
-            area_i = int(stats[i, cv2.CC_STAT_AREA])
-            if area_i < min_area:
-                continue
-            cx_i = float(stats[i, cv2.CC_STAT_LEFT] + 0.5 * stats[i, cv2.CC_STAT_WIDTH])
-            cy_i = float(stats[i, cv2.CC_STAT_TOP] + 0.5 * stats[i, cv2.CC_STAT_HEIGHT])
-            comp = lbl == i
-            mean_resp = float(response[comp].mean()) if np.any(comp) else 0.0
-            # Lower-tail shadows are accepted only when they have strong local contrast.
-            if cy_i >= y_bottom_gate and mean_resp < strong_resp:
-                continue
-            _ = cx_i  # keeps explicit geometry vars for readability/debugging
-            keep[comp] = 255
+            if int(stats[i, cv2.CC_STAT_AREA]) >= min_area:
+                keep[lbl == i] = 255
         shadow = keep
     return shadow
 

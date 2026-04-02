@@ -6,8 +6,8 @@ from PIL import ImageFont
 
 from cloth_pipeline.paths import BASE_DIR
 
-SKETCH_RGB = (34, 139, 69)
-SKETCH_BGR = (69, 139, 34)
+SKETCH_RGB = (0, 0, 0)
+SKETCH_BGR = (0, 0, 0)
 
 HED_MODEL_DIR = os.environ.get("HED_MODEL_DIR", BASE_DIR)
 HED_PROTO = os.path.join(HED_MODEL_DIR, "deploy.prototxt")
