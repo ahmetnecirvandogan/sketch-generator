@@ -8,6 +8,9 @@ from cloth_pipeline.paths import BASE_DIR
 
 SKETCH_RGB = (0, 0, 0)
 SKETCH_BGR = (0, 0, 0)
+# Edges / occlusion / depth / inner-hole contours (softer than silhouette + markers).
+SKETCH_STRUCT_RGB = (52, 52, 52)
+SKETCH_STRUCT_BGR = (52, 52, 52)
 
 HED_MODEL_DIR = os.environ.get("HED_MODEL_DIR", BASE_DIR)
 HED_PROTO = os.path.join(HED_MODEL_DIR, "deploy.prototxt")

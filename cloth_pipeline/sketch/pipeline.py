@@ -9,7 +9,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from cloth_pipeline.paths import DATASET_DIR
-from cloth_pipeline.sketch.constants import SKETCH_BGR, SKETCH_RGB
+from cloth_pipeline.sketch.constants import SKETCH_BGR, SKETCH_RGB, SKETCH_STRUCT_BGR
 from cloth_pipeline.sketch.drawing import (
     draw_annotations,
     draw_depth_layer_boundary,
@@ -21,6 +21,7 @@ from cloth_pipeline.sketch.drawing import (
 from cloth_pipeline.sketch.edges import detect_edges
 from cloth_pipeline.sketch.features import detect_dominant_color, highlight_region_mask
 from cloth_pipeline.sketch.shadows import compute_shadow_mask
+from cloth_pipeline.sketch.tones import smooth_lighting_luma
 from cloth_pipeline.sketch.segmentation import get_object_mask
 from cloth_pipeline.sketch.visibility import visibility_mask_u8
 
@@ -166,6 +167,34 @@ def generate_sketch(
     # This ensures shadowed cloth areas are never excluded from the silhouette.
     seg_mask = get_object_mask(img_bgr, alpha=alpha)
 
+    # Highlights first — used to trim false gray occlusion/depth strokes *only*
+    # where highlight actually sits.  Do **not** blanket-erase by raw threshold:
+    # that removed fold edges and outer form on bright fabrics (user regressions).
+    _hl_pre = highlight_region_mask(
+        img_bgr,
+        seg_mask,
+        keep_largest=False,
+        percentile=88.0,
+        min_rise_scale=0.55,
+        min_area_frac=0.0010,
+    )
+    _k_sup = np.ones((13, 13), np.uint8)
+    _hl_sup = cv2.dilate(_hl_pre, _k_sup, iterations=1)
+    # Erase structural gray only where the dilated highlight overlaps **actually bright**
+    # cloth.  Otherwise the dilate wipes fold lines in mid/dark interiors (15, 35, 37).
+    _luma_s = smooth_lighting_luma(img_bgr, seg_mask)
+    _obj_l = _luma_s[seg_mask > 0].astype(np.float32)
+    _p25 = float(np.percentile(_obj_l, 25.0))
+    _p50o = float(np.percentile(_obj_l, 50.0))
+    _p90o = float(np.percentile(_obj_l, 90.0))
+    if _p90o < 55.0:
+        _bright_floor = _p25 + 0.35 * max(1e-3, (_p90o - _p25))
+    else:
+        _bright_floor = _p50o + 0.12 * max(1.0, (_p90o - _p50o))
+    _struct_suppress = (
+        (_hl_sup > 0) & (_luma_s.astype(np.float32) >= (_bright_floor - 4.0))
+    ).astype(np.uint8) * 255
+
     # ── A: Edge detection (interior structural lines) ────────────────────────
     # Pass normal_path so the detector can use the geometry-only normal-map
     # gradient when the .npy file exists, skipping fine micro-fibre noise in RGB.
@@ -175,14 +204,14 @@ def generate_sketch(
     _k = np.ones((5, 5), np.uint8)
     interior_for_edges = cv2.erode(seg_mask, _k, iterations=1)
     edges = cv2.bitwise_and(edges, interior_for_edges)
-    canvas[edges > 0] = SKETCH_BGR
+    canvas[edges > 0] = SKETCH_STRUCT_BGR
 
     # ── A+: Depth-aware occlusion emphasis (regional threshold) ──────────────
-    canvas = draw_occlusion_edges(canvas, seg_mask, depth_path, SKETCH_BGR, thickness=1)
+    canvas = draw_occlusion_edges(canvas, seg_mask, depth_path, SKETCH_STRUCT_BGR, thickness=1)
 
     # ── A++: Depth layer boundary — marks the separation between overlapping
     # cloth tails in the lower half even when the mask merges them ────────────
-    canvas = draw_depth_layer_boundary(canvas, seg_mask, depth_path, SKETCH_BGR, thickness=1)
+    canvas = draw_depth_layer_boundary(canvas, seg_mask, depth_path, SKETCH_STRUCT_BGR, thickness=1)
 
     # ── A+++: Wobbly silhouette — outer boundary + inner hole boundaries ──────
     # RETR_TREE returns both outer contours and inner holes (gaps between tails).
@@ -204,22 +233,32 @@ def generate_sketch(
         for i, cnt in enumerate(all_cnts):
             if hier[i][3] != -1 and cv2.contourArea(cnt) > 150:
                 draw_wobbly_contour(
-                    canvas, cnt, SKETCH_BGR,
+                    canvas, cnt, SKETCH_STRUCT_BGR,
                     base_thickness=1.0, wobble_amp=0.8, wobble_freq=2,
                 )
 
+    # Erase structural ink where the render is clearly lit (removes false gray slabs).
+    _s = np.uint8(SKETCH_STRUCT_BGR)
+    struct_px = (
+        (np.abs(canvas.astype(np.int16) - _s.reshape(1, 1, 3)).sum(axis=2) <= 2)
+        & (_struct_suppress > 0)
+    )
+    canvas[struct_px] = (255, 255, 255)
+
     # ── Highlight (*) and shadow (#) markers on the garment ───────────────────
-    _hl = highlight_region_mask(
+    _hl = _hl_pre
+    _sh = compute_shadow_mask(
         img_bgr,
         seg_mask,
-        keep_largest=False,
-        percentile=88.0,
-        min_rise_scale=0.55,
-        min_area_frac=0.0010,
+        normal_path=normals_path_world if os.path.isfile(normals_path_world) else None,
+        depth_path=depth_path if os.path.isfile(depth_path) else None,
+        cam_origin=cam_origin if isinstance(cam_origin, (list, tuple)) and len(cam_origin) >= 3 else None,
+        cam_target=cam_target if isinstance(cam_target, (list, tuple)) and len(cam_target) >= 3 else None,
+        fov_deg=float(fov_deg),
     )
-    _sh = compute_shadow_mask(img_bgr, seg_mask)
-    # Do not place '#' where we already mark a highlight '*'.
+    # Do not place '#' on highlights or their dilated rim.
     _sh = cv2.bitwise_and(_sh, cv2.bitwise_not(_hl))
+    _sh = cv2.bitwise_and(_sh, cv2.bitwise_not(_hl_sup))
     if (
         cam_origin is not None
         and cam_target is not None

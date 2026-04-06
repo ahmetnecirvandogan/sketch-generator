@@ -15,6 +15,7 @@ MASKS_DIR = os.path.join(DATASET_DIR, "masks")
 ALBEDO_MAPS_DIR = os.path.join(DATASET_DIR, "textures")
 TEXTURES_DIR = ALBEDO_MAPS_DIR  # deprecated alias — same path as ALBEDO_MAPS_DIR
 CONDITION_DIR = os.path.join(DATASET_DIR, "conditioning")
+PAIR_VIEWS_DIR = os.path.join(DATASET_DIR, "pair_views")
 METADATA_PATH = os.path.join(DATASET_DIR, "metadata.jsonl")
 
 

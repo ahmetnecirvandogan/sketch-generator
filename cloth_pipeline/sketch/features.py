@@ -54,6 +54,13 @@ def highlight_region_mask(
             bright, (extra.astype(np.uint8) * 255)
         )
 
+    # Even studio lighting: upper-mid band (e.g. top of garment) still reads as highlight.
+    span90 = float(np.percentile(pixels, 90.0)) - p50
+    if span90 < 24.0 and p50 > 110.0:
+        p78b = float(np.percentile(pixels, 78.0))
+        extra_top = (luma >= p78b) & (seg_mask > 0)
+        bright = cv2.bitwise_or(bright, (extra_top.astype(np.uint8) * 255))
+
     n, lbl, stats, _ = cv2.connectedComponentsWithStats(bright)
     if n <= 1:
         return bright

@@ -52,7 +52,8 @@ def draw_occlusion_edges(
     lower_region[y_mid:, :] = eroded[y_mid:, :]
 
     occ_mask = np.zeros_like(grad_u8)
-    for region, pct in ((upper_region, 95), (lower_region, 85)):
+    # Stricter percentiles + thinner dilate reduce false gray slabs on noisy depth (e.g. 32).
+    for region, pct in ((upper_region, 97), (lower_region, 90)):
         obj_grad = grad_u8[region > 0]
         if obj_grad.size == 0:
             continue
@@ -60,7 +61,8 @@ def draw_occlusion_edges(
         _, tmp = cv2.threshold(grad_u8, int(thresh), 255, cv2.THRESH_BINARY)
         occ_mask = cv2.bitwise_or(occ_mask, cv2.bitwise_and(tmp, region))
 
-    occ_mask = cv2.dilate(occ_mask, np.ones((thickness, thickness), np.uint8), iterations=1)
+    dk = max(1, min(thickness, 2))
+    occ_mask = cv2.dilate(occ_mask, np.ones((dk, dk), np.uint8), iterations=1)
     canvas[occ_mask > 0] = color_bgr
     return canvas
 
@@ -100,7 +102,7 @@ def draw_depth_layer_boundary(
     grad_vals = grad[lower_mask > 0]
     if grad_vals.size < 50:
         return canvas
-    grad_cut = float(np.percentile(grad_vals, 78))
+    grad_cut = float(np.percentile(grad_vals, 84))
     strong_grad = ((grad >= grad_cut) & (lower_mask > 0)).astype(np.uint8) * 255
 
     # Split lower region into near/far at the median depth.
