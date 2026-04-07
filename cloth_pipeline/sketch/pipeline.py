@@ -18,7 +18,6 @@ from cloth_pipeline.sketch.drawing import (
     draw_wobbly_contour,
     measure_top_left_text_pad,
 )
-from cloth_pipeline.sketch.augment import apply_bpd
 from cloth_pipeline.sketch.edges import detect_edges
 from cloth_pipeline.sketch.features import detect_dominant_color
 from cloth_pipeline.sketch.segmentation import get_object_mask
@@ -191,14 +190,14 @@ def generate_sketch(
             draw_wobbly_contour(
                 canvas,
                 max(outer_candidates, key=cv2.contourArea),
-                SKETCH_BGR, base_thickness=2.0, wobble_amp=0.95, wobble_freq=2,
+                SKETCH_BGR, base_thickness=2.0, wobble_amp=0.0, wobble_freq=2,
             )
         # Inner hole contours (have a parent) — gaps between separate cloth parts
         for i, cnt in enumerate(all_cnts):
             if hier[i][3] != -1 and cv2.contourArea(cnt) > 150:
                 draw_wobbly_contour(
                     canvas, cnt, SKETCH_BGR,
-                    base_thickness=1.0, wobble_amp=0.8, wobble_freq=2,
+                    base_thickness=1.0, wobble_amp=0.0, wobble_freq=2,
                 )
 
     # ── Colour detection for text ─────────────────────────────────────────────
@@ -245,12 +244,5 @@ def generate_sketch(
         sketch_content_top=pad_top,
     )
     canvas = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
-
-    # Soften aliasing; sigma between “hairline” and original heavy bleed.
-    canvas = cv2.GaussianBlur(canvas, (3, 3), 0.42)
-
-    # BPD augmentation — perturbs strokes to mimic freehand drawing variability.
-    # Text block (top-left) is kept pixel-exact.
-    canvas = apply_bpd(canvas, text_pad_top=pad_top, text_pad_left=pad_left, max_displacement=5.0)
 
     return canvas

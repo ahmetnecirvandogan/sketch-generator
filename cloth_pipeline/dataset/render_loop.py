@@ -1,9 +1,12 @@
 """Mitsuba render loop for Stage 1 (dataset generation)."""
 
+from __future__ import annotations
+
 import glob
 import json
 import os
 import random
+import sys
 
 import cv2
 import mitsuba as mi
@@ -13,15 +16,98 @@ from cloth_pipeline.dataset.textures import generate_random_albedo_map
 from cloth_pipeline.paths import (
     DATASET_DIR,
     DEPTH_DIR,
+    FRONT_PREVIEW_DIR,
     MASKS_DIR,
     MESHES_DIR,
     METADATA_PATH,
     NORMALS_DIR,
     RENDERS_DIR,
     ensure_dataset_stage_dirs,
+    ensure_front_preview_dir,
 )
 
 mi.set_variant("scalar_rgb")
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+
+
+# Default film size / samples are tuned for laptops where Mitsuba often prints
+# ``jitc_llvm_init(): LLVM API initialization failed`` — JIT falls back to a
+# very slow path; 768² @ 512 spp can look “hung” for tens of minutes on frame 0.
+# Box rfilter stays sharp; raise quality with env: NECH_FILM_W=768 NECH_SAMPLES=384
+FILM_WIDTH = max(64, _env_int("NECH_FILM_W", 512))
+FILM_HEIGHT = max(64, _env_int("NECH_FILM_H", 512))
+PATH_SAMPLE_COUNT = max(8, _env_int("NECH_SAMPLES", 256))
+
+# Optional per-mesh camera tweaks (OBJ stem without extension). The default front
+# view uses a small +Y lift; very flat / looped pieces can read as a “top-down
+# into the ring” shot — lower `front_y_lift` (or 0) for a more head-on view.
+MESH_FRONT_CAMERA_OVERRIDES: dict[str, dict[str, float]] = {
+    # Flat loop reads as “looking down the ring” with default lift; pure +Z is more head-on.
+    # Softer key in previews only — full dataset still uses random key strength per frame.
+    "10152_WomensScarf_v01_L3": {"front_y_lift": 0.0, "preview_key_scale": 0.55},
+}
+
+
+def _object_mask_from_depth(depth: np.ndarray) -> np.ndarray:
+    """True where the primary ray hit the mesh (not environment / miss)."""
+    d = np.asarray(depth, dtype=np.float64)
+    return (
+        np.isfinite(d)
+        & (d > 1e-5)
+        & (d < 1e8)
+    ).astype(np.float32)
+
+
+def _front_y_lift_for_mesh(mesh_stem: str) -> float:
+    base = float(os.environ.get("NECH_FRONT_ELEV", "0.22"))
+    ov = MESH_FRONT_CAMERA_OVERRIDES.get(mesh_stem, {})
+    if "front_y_lift" in ov:
+        return float(ov["front_y_lift"])
+    return base
+
+
+def _front_camera_offset_dir(y_lift: float) -> np.ndarray:
+    """Unit direction in the +Z hemisphere with given world +Y lift."""
+    d = np.array([0.0, y_lift, 1.0], dtype=np.float64)
+    d /= max(1e-12, float(np.linalg.norm(d)))
+    return d
+
+
+def front_camera_look_at(
+    cx: float,
+    cy: float,
+    cz: float,
+    cam_dist: float,
+    *,
+    mesh_stem: str = "",
+) -> tuple[list[float], list[float]]:
+    """Fixed front view: camera offset from bbox center; optional per-mesh y lift."""
+    y_lift = _front_y_lift_for_mesh(mesh_stem)
+    d = _front_camera_offset_dir(y_lift)
+    ox = cx + float(d[0]) * cam_dist
+    oy = cy + float(d[1]) * cam_dist
+    oz = cz + float(d[2]) * cam_dist
+    return [ox, oy, oz], [cx, cy, cz]
+
+
+def _suppress_mc_sparkles(rgb: np.ndarray) -> np.ndarray:
+    """
+    Reduce path-tracer fireflies (“glitter”): pixels much brighter than a local
+    5×5 median luminance are scaled down. Wide specular lobes stay intact.
+    """
+    rgb = np.clip(np.asarray(rgb, dtype=np.float32), 0.0, 1.0)
+    lum = np.max(rgb, axis=2)
+    lum_u8 = (lum * 255.0).astype(np.uint8)
+    med = cv2.medianBlur(lum_u8, 5).astype(np.float32) / 255.0
+    allowed = np.clip(med * 4.0 + 0.04, 0.06, 1.0)
+    scale = np.where(lum > allowed, allowed / np.maximum(lum, 1e-6), 1.0).astype(np.float32)
+    return np.clip(rgb * scale[..., None], 0.0, 1.0)
 
 
 def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
@@ -60,6 +146,16 @@ def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
         and os.path.exists(os.path.join(MASKS_DIR,   f"mask_{j:04d}.png"))
     )
     print(f"Checkpoint: {existing}/{num_samples} frames already done, resuming.\n")
+    print(
+        f"Film {FILM_WIDTH}×{FILM_HEIGHT}, {PATH_SAMPLE_COUNT} samples/pixel. "
+        f"Override: NECH_FILM_W, NECH_FILM_H, NECH_SAMPLES.",
+        flush=True,
+    )
+    print(
+        "If LLVM init failed above, the first frame can sit silent a long time "
+        "while Mitsuba compiles; lower NECH_SAMPLES or fix the Mitsuba/LLVM install.\n",
+        flush=True,
+    )
 
     for i in range(num_samples):
         frame_str    = f"{i:04d}"
@@ -80,10 +176,31 @@ def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
             # No metadata for this frame — must re-render to populate it
             print(f"  [{i+1:>4}/{num_samples}] Re-rendering {frame_str} (missing metadata)")
 
+        print(
+            f"  [{i+1:>4}/{num_samples}] Frame {frame_str}: setup (mesh, lights, materials)…",
+            flush=True,
+        )
+
         # -----------------------------------------------------------------------
-        # Randomise Geometry
+        # Randomise Geometry (optional: pin mesh when regenerating one frame)
         # -----------------------------------------------------------------------
-        current_mesh_path = random.choice(mesh_files)
+        only_frame_env = os.environ.get("NECH_ONLY_FRAME", "").strip()
+        force_stem = os.environ.get("NECH_FORCE_MESH_STEM", "").strip()
+        pin_idx: int | None = None
+        if only_frame_env != "":
+            try:
+                pin_idx = int(only_frame_env)
+            except ValueError:
+                pin_idx = None
+        if pin_idx is not None and force_stem != "" and i == pin_idx:
+            forced_path = os.path.join(MESHES_DIR, f"{force_stem}.obj")
+            if not os.path.isfile(forced_path):
+                raise FileNotFoundError(
+                    f"NECH_FORCE_MESH_STEM: mesh not found: {forced_path}"
+                )
+            current_mesh_path = forced_path
+        else:
+            current_mesh_path = random.choice(mesh_files)
         mesh_name = os.path.basename(current_mesh_path).replace(".obj", "")
 
         # Calculate bounding box for this specific mesh to frame it correctly
@@ -106,114 +223,76 @@ def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
         TARGET_FILL  = 0.70  # object should cover ~70 % of the image
         max_extent   = max(float(extents[0]), float(extents[1]), float(extents[2]))
         cam_dist     = max_extent / (2.0 * TARGET_FILL * np.tan(np.radians(fov / 2.0)))
-        cam_origin   = [cx, cy, cz + cam_dist]
-        cam_target   = [cx, cy, cz]
-
-        # -----------------------------------------------------------------------
-        # Randomise Lighting — 1-10 lights with randomised type & direction
-        #
-        # Light 0 is ALWAYS a directional key light so the cloth is guaranteed
-        # to receive a minimum base illumination regardless of how point/spot
-        # lights happen to be positioned.  Remaining lights are random types.
-        # -----------------------------------------------------------------------
-        EXTRA_LIGHT_TYPES = ['directional', 'point', 'spot']
-        num_lights = random.randint(1, 10)
-        dist_sq = cam_dist ** 2
-
-        lights_meta = []
-        lights_dict = {}
-
-        def _random_temperature():
-            tc = random.choice(['warm', 'neutral', 'cool'])
-            if tc == 'warm':    return tc, [1.3, 1.0, 0.7]
-            elif tc == 'cool':  return tc, [0.8, 0.9, 1.3]
-            return tc, [1.0, 1.0, 1.0]
-
-        for li in range(num_lights):
-            light_type = 'directional' if li == 0 else random.choice(EXTRA_LIGHT_TYPES)
-            temp_choice, lt = _random_temperature()
-
-            if light_type == 'directional':
-                if li == 0:
-                    key_intensity = random.uniform(2.0, 5.0)
-                else:
-                    key_intensity = random.uniform(0.5, 3.0)
-                dx = random.uniform(-1.0, 1.0)
-                dy = random.uniform(-0.5, 1.0)
-                dz = random.uniform(-1.0, -0.1)
-                irr = [lt[0] * key_intensity, lt[1] * key_intensity, lt[2] * key_intensity]
-                lights_dict[f'light_{li}'] = {
-                    'type': 'directional',
-                    'direction': [dx, dy, dz],
-                    'irradiance': {'type': 'rgb', 'value': irr},
-                }
-                lights_meta.append({
-                    'type': 'directional', 'direction': [dx, dy, dz],
-                    'irradiance': irr, 'temperature': temp_choice,
-                })
-
-            elif light_type == 'point':
-                px = cx + random.uniform(-max_extent, max_extent)
-                py = cy + random.uniform(max_extent * 0.3, max_extent * 2)
-                pz = cz + random.uniform(-max_extent, max_extent * 0.5)
-                base_power = random.uniform(2.0, 6.0) * dist_sq * 0.5
-                power = [lt[0] * base_power, lt[1] * base_power, lt[2] * base_power]
-                lights_dict[f'light_{li}'] = {
-                    'type': 'point',
-                    'position': [px, py, pz],
-                    'intensity': {'type': 'rgb', 'value': power},
-                }
-                lights_meta.append({
-                    'type': 'point', 'position': [px, py, pz],
-                    'intensity': power, 'temperature': temp_choice,
-                })
-
-            else:  # spot — always aimed at the mesh centre
-                sx = cx + random.uniform(-max_extent * 1.5, max_extent * 1.5)
-                sy = cy + random.uniform(max_extent * 0.5, max_extent * 2.5)
-                sz = cz + random.uniform(-max_extent * 1.5, max_extent * 0.5)
-                spot_target = [
-                    cx + random.uniform(-max_extent * 0.2, max_extent * 0.2),
-                    cy + random.uniform(-max_extent * 0.2, max_extent * 0.2),
-                    cz + random.uniform(-max_extent * 0.2, max_extent * 0.2),
-                ]
-                cutoff_angle = random.uniform(20.0, 60.0)
-                beam_width = cutoff_angle * random.uniform(0.5, 0.9)
-                base_power = random.uniform(2.0, 6.0) * dist_sq * 0.8
-                spot_power = [lt[0] * base_power, lt[1] * base_power, lt[2] * base_power]
-                lights_dict[f'light_{li}'] = {
-                    'type': 'spot',
-                    'to_world': mi.ScalarTransform4f.look_at(
-                        origin=[sx, sy, sz],
-                        target=spot_target,
-                        up=[0, 1, 0],
-                    ),
-                    'cutoff_angle': cutoff_angle,
-                    'beam_width': beam_width,
-                    'intensity': {'type': 'rgb', 'value': spot_power},
-                }
-                lights_meta.append({
-                    'type': 'spot', 'position': [sx, sy, sz],
-                    'target': spot_target,
-                    'cutoff_angle': cutoff_angle, 'beam_width': beam_width,
-                    'intensity': spot_power, 'temperature': temp_choice,
-                })
-
-        # -----------------------------------------------------------------------
-        # Randomise Mesh Rotation
-        # -----------------------------------------------------------------------
-        yaw   = random.uniform(0.0,   360.0)
-        pitch = random.uniform(-20.0,  20.0)
-
-        mesh_transform = (
-            mi.ScalarTransform4f.translate([cx, cy, cz])
-            @ mi.ScalarTransform4f.rotate(axis=[0, 1, 0], angle=yaw)
-            @ mi.ScalarTransform4f.rotate(axis=[1, 0, 0], angle=pitch)
-            @ mi.ScalarTransform4f.translate([-cx, -cy, -cz])
+        # Fixed front camera (+Z hemisphere, slight +Y lift); mesh is not spun.
+        cam_origin, cam_target = front_camera_look_at(
+            cx, cy, cz, cam_dist, mesh_stem=mesh_name
         )
 
-        # Serialise the 4x4 matrix to a plain Python list for JSON storage.
-        # Neural Contours Geometry Branch needs this to reconstruct the exact view.
+        # -----------------------------------------------------------------------
+        # Lighting — exactly 1 constant environment + 1 directional key
+        #
+        # The environment emitter gives uniform fill so the object stays readable.
+        # The directional uses a random unit direction each frame for varied
+        # highlights and shadows. No point/spot lights.
+        # -----------------------------------------------------------------------
+        num_lights = 2
+
+        # Environment must stay achromatic: tinted constant env is what the camera
+        # sees on rays that miss the cloth, and film alpha stays 1 there — so warm/cool
+        # tints were turning the whole backdrop brown/blue instead of composited gray.
+        # Optional mild tint on the directional only (highlights), not on fill.
+        def _key_temperature_tint():
+            tc = random.choice(['warm', 'neutral', 'cool'])
+            if tc == 'warm':
+                return tc, [1.08, 1.0, 0.92]
+            if tc == 'cool':
+                return tc, [0.92, 0.96, 1.06]
+            return tc, [1.0, 1.0, 1.0]
+
+        temp_key, tint_key = _key_temperature_tint()
+
+        # Uniform random direction on the sphere (Mitsuba: direction the emitter radiates along).
+        _dir = np.random.randn(3).astype(np.float64)
+        _dir /= max(1e-12, float(np.linalg.norm(_dir)))
+        dx, dy, dz = float(_dir[0]), float(_dir[1]), float(_dir[2])
+
+        # Stronger neutral fill so fabrics (especially dark/rough) stay readable.
+        env_scale = random.uniform(0.45, 0.75)
+        base_env_rgb = [env_scale, env_scale, env_scale]
+
+        key_irr = random.uniform(4.5, 9.0)
+        base_key_rgb = [tint_key[j] * key_irr for j in range(3)]
+
+        lights_meta = [
+            {
+                'type': 'constant',
+                'radiance': list(base_env_rgb),
+                'temperature': 'neutral',
+            },
+            {
+                'type': 'directional',
+                'direction': [dx, dy, dz],
+                'irradiance': list(base_key_rgb),
+                'temperature': temp_key,
+            },
+        ]
+
+        lights_dict = {
+            'environment': {
+                'type': 'constant',
+                'radiance': {'type': 'rgb', 'value': list(base_env_rgb)},
+            },
+            'key_light': {
+                'type': 'directional',
+                'direction': [dx, dy, dz],
+                'irradiance': {'type': 'rgb', 'value': list(base_key_rgb)},
+            },
+        }
+
+        # -----------------------------------------------------------------------
+        # Canonical mesh pose (no random yaw/pitch) — fixed front camera defines the view.
+        # -----------------------------------------------------------------------
+        mesh_transform = mi.ScalarTransform4f.translate([0.0, 0.0, 0.0])
         mesh_transform_matrix = mesh_transform.matrix.numpy().tolist()
 
         # -----------------------------------------------------------------------
@@ -357,7 +436,10 @@ def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
                 'aovs': 'depth:depth,normals:sh_normal',
                 'my_path': {
                     'type': 'path',
-                    'max_depth': 6,
+                    # Low depth avoids long specular chains (fireflies / “glitter”) while
+                    # still allowing one extra bounce vs pure direct (helps folds & thin
+                    # fabrics). Deeper than ~4 tends to sparkle on principled+clearcoat.
+                    'max_depth': 3,
                 },
             },
 
@@ -371,13 +453,14 @@ def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
                 ),
                 'film': {
                     'type': 'hdrfilm',
-                    'width':  512,
-                    'height': 512,
+                    'width': FILM_WIDTH,
+                    'height': FILM_HEIGHT,
                     'pixel_format': 'rgba',
+                    'rfilter': {'type': 'box'},
                 },
                 'sampler': {
                     'type': 'independent',
-                    'sample_count': 128,
+                    'sample_count': PATH_SAMPLE_COUNT,
                 },
             },
 
@@ -404,23 +487,36 @@ def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
         # -----------------------------------------------------------------------
         # Render with brightness guarantee
         #
-        # After the first render we check the mean luminance of object pixels
-        # (alpha > 0).  If it falls below MIN_BRIGHTNESS the cloth is not
-        # visually readable, so we inject a rescue directional light aimed
-        # straight at the camera target and re-render.  Up to MAX_RETRIES
-        # attempts; each retry doubles the rescue light intensity.
+        # If mean object luminance is below MIN_BRIGHTNESS, scale both the
+        # environment and key light together (still only two emitters).
         # -----------------------------------------------------------------------
         MIN_BRIGHTNESS = 0.08   # minimum mean luminance (0-1 float scale)
         MAX_RETRIES    = 3
-        rescue_boost   = 0
+        brightness_scale = 1.0
 
         for attempt in range(1 + MAX_RETRIES):
+            scene_dict['environment']['radiance']['value'] = [
+                base_env_rgb[j] * brightness_scale for j in range(3)
+            ]
+            scene_dict['key_light']['irradiance']['value'] = [
+                base_key_rgb[j] * brightness_scale for j in range(3)
+            ]
+            print(
+                f"  [{i+1:>4}/{num_samples}] Ray tracing (attempt {attempt + 1}) — "
+                f"{FILM_WIDTH}×{FILM_HEIGHT} @ {PATH_SAMPLE_COUNT} spp…",
+                flush=True,
+            )
             scene = mi.load_dict(scene_dict)
             render_np = np.array(mi.render(scene))
+            sys.stdout.flush()
 
             beauty_tmp = np.clip(render_np[:, :, :3], 0.0, 1.0)
-            alpha_tmp  = render_np[:, :, 3] if render_np.shape[2] >= 4 else np.ones(render_np.shape[:2])
-            obj_pixels = beauty_tmp[alpha_tmp > 0.5]
+            if render_np.shape[2] >= 5:
+                obj_mask = _object_mask_from_depth(render_np[:, :, 4]) > 0.5
+            else:
+                alpha_tmp = render_np[:, :, 3] if render_np.shape[2] >= 4 else np.ones(render_np.shape[:2])
+                obj_mask = alpha_tmp > 0.5
+            obj_pixels = beauty_tmp[obj_mask]
 
             if obj_pixels.size == 0:
                 mean_lum = 0.0
@@ -432,21 +528,12 @@ def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
             if mean_lum >= MIN_BRIGHTNESS:
                 break
 
-            rescue_boost += 1
-            rescue_int = 3.0 * (2 ** rescue_boost)
-            rescue_key = f'rescue_light_{rescue_boost}'
-            scene_dict[rescue_key] = {
-                'type': 'directional',
-                'direction': [0.0, -0.3, -1.0],
-                'irradiance': {'type': 'rgb', 'value': [rescue_int, rescue_int, rescue_int]},
-            }
-            lights_meta.append({
-                'type': 'directional', 'direction': [0.0, -0.3, -1.0],
-                'irradiance': [rescue_int, rescue_int, rescue_int],
-                'temperature': 'neutral', 'rescue': True,
-            })
+            brightness_scale *= 2.0
             print(f"  [{i+1:>3}/{num_samples}] Brightness {mean_lum:.3f} < {MIN_BRIGHTNESS} — "
-                  f"adding rescue light (attempt {rescue_boost}, intensity {rescue_int:.1f})")
+                  f"scaling env+key ×{brightness_scale:.1f} (attempt {attempt + 1})")
+
+        lights_meta[0]['radiance'] = [base_env_rgb[j] * brightness_scale for j in range(3)]
+        lights_meta[1]['irradiance'] = [base_key_rgb[j] * brightness_scale for j in range(3)]
 
         print(f"  [{i+1:>3}/{num_samples}] Raw tensor shape: {render_np.shape} | brightness: {mean_lum:.3f}")
 
@@ -454,17 +541,24 @@ def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
         # Composite the cloth over a solid light-gray backdrop so renders look
         # presentation-ready out of the box (no transparent checkerboard / black).
         #
-        # Save cloth coverage to a separate mask file for Stage 2 segmentation.
-        beauty_np    = np.clip(render_np[:, :, :3], 0.0, 1.0)
-        alpha_np     = np.clip(render_np[:, :, 3],  0.0, 1.0) if render_np.shape[2] >= 4 else np.ones(render_np.shape[:2], np.float32)
-        bg_rgb       = np.array([0.82, 0.82, 0.82], dtype=np.float32)  # ~RGB(209,209,209)
-        comp_np      = beauty_np * alpha_np[..., None] + bg_rgb * (1.0 - alpha_np[..., None])
-        comp_uint8   = (comp_np * 255).astype(np.uint8)
-        bgr_uint8    = cv2.cvtColor(comp_uint8, cv2.COLOR_RGB2BGR)
-        alpha_uint8  = np.full(alpha_np.shape, 255, dtype=np.uint8)
-        bgra_uint8   = np.dstack([bgr_uint8, alpha_uint8])
+        # Use depth to decide cloth vs background: film alpha is often 1 for env hits,
+        # which previously let tinted environment colour replace the gray backdrop.
+        # Save the same mask for Stage 2 segmentation.
+        beauty_np = _suppress_mc_sparkles(np.clip(render_np[:, :, :3], 0.0, 1.0))
+        if render_np.shape[2] >= 5:
+            mesh_alpha = _object_mask_from_depth(render_np[:, :, 4])
+        else:
+            mesh_alpha = np.clip(
+                render_np[:, :, 3], 0.0, 1.0
+            ) if render_np.shape[2] >= 4 else np.ones(render_np.shape[:2], np.float32)
+        bg_rgb = np.array([0.82, 0.82, 0.82], dtype=np.float32)  # ~RGB(209,209,209)
+        comp_np = beauty_np * mesh_alpha[..., None] + bg_rgb * (1.0 - mesh_alpha[..., None])
+        comp_uint8 = (comp_np * 255).astype(np.uint8)
+        bgr_uint8 = cv2.cvtColor(comp_uint8, cv2.COLOR_RGB2BGR)
+        alpha_uint8 = np.full(mesh_alpha.shape, 255, dtype=np.uint8)
+        bgra_uint8 = np.dstack([bgr_uint8, alpha_uint8])
         cv2.imwrite(render_path, bgra_uint8)
-        cv2.imwrite(mask_path, (alpha_np * 255).astype(np.uint8))
+        cv2.imwrite(mask_path, (mesh_alpha * 255).astype(np.uint8))
 
         # ---- Save depth map (float32 .npy — lossless, no codec needed) ----
         if render_np.shape[2] >= 5:
@@ -508,6 +602,8 @@ def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
             "cam_origin":         cam_origin,
             "cam_target":         cam_target,
             "fov_deg":            fov,
+            "camera_mode":        "fixed_front",
+            "front_camera_y_lift": _front_y_lift_for_mesh(mesh_name),
             # 4×4 row-major matrix as a list-of-lists (JSON serialisable)
             "mesh_transform":     mesh_transform_matrix,
             # ── Lighting configuration ──
@@ -553,4 +649,132 @@ def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
     print(f"  • normal .npy  → {NORMALS_DIR}")
     print(f"  • metadata     → {METADATA_PATH}")
     print("\nNext: run  python generate_sketches.py  to run Neural Contours inference.")
+
+
+def run_front_mesh_previews(*, only_stem: str | None = None) -> None:
+    """
+    One neutral render per mesh under dataset/front_previews/ using the same fixed
+    front camera as the main dataset (identity mesh pose). For quick visual check
+    of framing before full runs.
+
+    If ``only_stem`` is set (OBJ basename without ``.obj``), only that mesh is rendered.
+    """
+    ensure_front_preview_dir()
+    mesh_files = sorted(glob.glob(os.path.join(MESHES_DIR, "*.obj")))
+    if not mesh_files:
+        print(f"[ERROR] No .obj files found in {MESHES_DIR}.")
+        raise SystemExit(1)
+    if only_stem:
+        mesh_files = [
+            p
+            for p in mesh_files
+            if os.path.basename(p).replace(".obj", "") == only_stem
+        ]
+        if not mesh_files:
+            print(f"[ERROR] No mesh matching stem {only_stem!r} in {MESHES_DIR}.")
+            raise SystemExit(1)
+
+    prev_w = max(64, _env_int("NECH_PREVIEW_W", 512))
+    prev_h = max(64, _env_int("NECH_PREVIEW_H", 512))
+    prev_spp = max(16, _env_int("NECH_PREVIEW_SAMPLES", 96))
+    fov = 40.0
+    target_fill = 0.70
+
+    print(f"Front previews: {len(mesh_files)} mesh(es) → {FRONT_PREVIEW_DIR}")
+    print(f"  size {prev_w}×{prev_h}, {prev_spp} spp (NECH_PREVIEW_* env to override)\n", flush=True)
+
+    for mesh_path in mesh_files:
+        stem = os.path.basename(mesh_path).replace(".obj", "")
+        safe = "".join(c if c.isalnum() or c in "._-" else "_" for c in stem)
+        out_png = os.path.join(FRONT_PREVIEW_DIR, f"{safe}_front.png")
+
+        loaded_shape = mi.load_dict({"type": "obj", "filename": mesh_path})
+        bbox = loaded_shape.bbox()
+        center = bbox.center()
+        extents = bbox.extents()
+        cx, cy, cz = float(center[0]), float(center[1]), float(center[2])
+        max_extent = max(float(extents[0]), float(extents[1]), float(extents[2]))
+        cam_dist = max_extent / (2.0 * target_fill * np.tan(np.radians(fov / 2.0)))
+        cam_origin, cam_target = front_camera_look_at(
+            cx, cy, cz, cam_dist, mesh_stem=stem
+        )
+
+        env_rgb = [0.55, 0.55, 0.55]
+        kd = np.array([-0.28, -0.45, -0.85], dtype=np.float64)
+        kd /= max(1e-12, float(np.linalg.norm(kd)))
+        key_rgb = [6.2, 6.1, 6.0]
+        pk = float(MESH_FRONT_CAMERA_OVERRIDES.get(stem, {}).get("preview_key_scale", 1.0))
+        key_rgb = [pk * x for x in key_rgb]
+
+        scene_dict = {
+            "type": "scene",
+            "integrator": {
+                "type": "aov",
+                "aovs": "depth:depth,normals:sh_normal",
+                "my_path": {"type": "path", "max_depth": 3},
+            },
+            "sensor": {
+                "type": "perspective",
+                "fov": fov,
+                "to_world": mi.ScalarTransform4f.look_at(
+                    origin=cam_origin,
+                    target=cam_target,
+                    up=[0, 1, 0],
+                ),
+                "film": {
+                    "type": "hdrfilm",
+                    "width": prev_w,
+                    "height": prev_h,
+                    "pixel_format": "rgba",
+                    "rfilter": {"type": "box"},
+                },
+                "sampler": {"type": "independent", "sample_count": prev_spp},
+            },
+            "cloth_object": {
+                "type": "obj",
+                "filename": mesh_path,
+                "to_world": mi.ScalarTransform4f.translate([0.0, 0.0, 0.0]),
+                "bsdf": {
+                    "type": "principled",
+                    "base_color": {"type": "rgb", "value": [0.62, 0.6, 0.58]},
+                    "roughness": 0.62,
+                    "specular": 0.35,
+                    "sheen": 0.25,
+                    "sheen_tint": 0.5,
+                    "anisotropic": 0.0,
+                    "spec_trans": 0.0,
+                    "clearcoat": 0.0,
+                },
+            },
+            "environment": {
+                "type": "constant",
+                "radiance": {"type": "rgb", "value": env_rgb},
+            },
+            "key_light": {
+                "type": "directional",
+                "direction": [float(kd[0]), float(kd[1]), float(kd[2])],
+                "irradiance": {"type": "rgb", "value": key_rgb},
+            },
+        }
+
+        print(f"  … {safe} ({prev_w}×{prev_h} @ {prev_spp} spp)", flush=True)
+        scene = mi.load_dict(scene_dict)
+        render_np = np.array(mi.render(scene))
+        beauty_np = _suppress_mc_sparkles(np.clip(render_np[:, :, :3], 0.0, 1.0))
+        if render_np.shape[2] >= 5:
+            mesh_alpha = _object_mask_from_depth(render_np[:, :, 4])
+        else:
+            mesh_alpha = (
+                np.clip(render_np[:, :, 3], 0.0, 1.0)
+                if render_np.shape[2] >= 4
+                else np.ones(render_np.shape[:2], np.float32)
+            )
+        bg_rgb = np.array([0.82, 0.82, 0.82], dtype=np.float32)
+        comp_np = beauty_np * mesh_alpha[..., None] + bg_rgb * (1.0 - mesh_alpha[..., None])
+        comp_uint8 = (comp_np * 255).astype(np.uint8)
+        bgr_uint8 = cv2.cvtColor(comp_uint8, cv2.COLOR_RGB2BGR)
+        cv2.imwrite(out_png, bgr_uint8)
+        print(f"     ✓ {out_png}", flush=True)
+
+    print(f"\n✓ Done. Open {FRONT_PREVIEW_DIR} to review each mesh.")
 

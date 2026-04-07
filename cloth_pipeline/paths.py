@@ -16,11 +16,16 @@ ALBEDO_MAPS_DIR = os.path.join(DATASET_DIR, "textures")
 TEXTURES_DIR = ALBEDO_MAPS_DIR  # deprecated alias — same path as ALBEDO_MAPS_DIR
 CONDITION_DIR = os.path.join(DATASET_DIR, "conditioning")
 METADATA_PATH = os.path.join(DATASET_DIR, "metadata.jsonl")
+FRONT_PREVIEW_DIR = os.path.join(DATASET_DIR, "front_previews")
 
 
 def ensure_dataset_stage_dirs() -> None:
     for d in (RENDERS_DIR, DEPTH_DIR, NORMALS_DIR, MASKS_DIR, MESHES_DIR, ALBEDO_MAPS_DIR):
         os.makedirs(d, exist_ok=True)
+
+
+def ensure_front_preview_dir() -> None:
+    os.makedirs(FRONT_PREVIEW_DIR, exist_ok=True)
 
 
 def ensure_sketch_stage_dirs() -> None:
