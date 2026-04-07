@@ -18,6 +18,7 @@ from cloth_pipeline.sketch.drawing import (
     draw_wobbly_contour,
     measure_top_left_text_pad,
 )
+from cloth_pipeline.sketch.augment import apply_bpd
 from cloth_pipeline.sketch.edges import detect_edges
 from cloth_pipeline.sketch.features import detect_dominant_color
 from cloth_pipeline.sketch.segmentation import get_object_mask
@@ -247,4 +248,9 @@ def generate_sketch(
 
     # Soften aliasing; sigma between “hairline” and original heavy bleed.
     canvas = cv2.GaussianBlur(canvas, (3, 3), 0.42)
+
+    # BPD augmentation — perturbs strokes to mimic freehand drawing variability.
+    # Text block (top-left) is kept pixel-exact.
+    canvas = apply_bpd(canvas, text_pad_top=pad_top, text_pad_left=pad_left, max_displacement=5.0)
+
     return canvas

@@ -14,6 +14,126 @@ from PIL import Image, ImageDraw
 from cloth_pipeline.sketch.constants import resolve_font
 
 
+def draw_hole_hatch(
+    canvas:         np.ndarray,
+    hole_contours:  list,
+    color_bgr:      tuple,
+    *,
+    spacing:        int   = 12,
+    thickness:      int   = 1,
+) -> np.ndarray:
+    """
+    Light cross-hatch inside cloth holes (neck opening, gaps between tails) to
+    signal empty/negative space — the standard sketching convention for showing
+    that you can see through the garment.
+
+    Uses two diagonal directions (45° and 135°) at *spacing* px apart so the
+    fill is clearly distinguishable from shadow hatching (single-direction) and
+    from the cloth surface itself.
+    """
+    h, w = canvas.shape[:2]
+    hole_mask = np.zeros((h, w), dtype=np.uint8)
+    for cnt in hole_contours:
+        if cv2.contourArea(cnt) > 200:
+            cv2.drawContours(hole_mask, [cnt], -1, 255, cv2.FILLED)
+    if not np.any(hole_mask):
+        return canvas
+
+    hatch = np.zeros((h, w), dtype=np.uint8)
+    diag = int(math.hypot(w, h)) + 1
+    for angle_deg in (45.0, 135.0):
+        rad = math.radians(angle_deg)
+        cos_a, sin_a = math.cos(rad), math.sin(rad)
+        offset = -float(diag)
+        while offset < diag:
+            x1 = int(-diag * cos_a - offset * sin_a)
+            y1 = int(-diag * sin_a + offset * cos_a)
+            x2 = int( diag * cos_a - offset * sin_a)
+            y2 = int( diag * sin_a + offset * cos_a)
+            cv2.line(hatch, (x1, y1), (x2, y2), 255, thickness)
+            offset += spacing
+
+    canvas[cv2.bitwise_and(hatch, hole_mask) > 0] = color_bgr
+    return canvas
+
+
+def draw_knot_emphasis(
+    canvas:    np.ndarray,
+    seg_mask:  np.ndarray,
+    depth_path: str,
+    color_bgr: tuple,
+    *,
+    thickness: int = 2,
+) -> np.ndarray:
+    """
+    Emphasise knot and overlap topology in the upper portion of the garment by
+    drawing bolder depth-discontinuity edges where local depth variance is high.
+
+    High local depth variance is the depth-map signature of a knot: many folds
+    converge, creating rapid depth changes within a small neighbourhood.  By
+    lowering the edge threshold in those regions (compared to ``draw_occlusion_edges``
+    which uses a global top-5% cut) we reveal the internal fold structure that
+    makes a knot read as topologically complex rather than a featureless blob.
+    """
+    if not os.path.exists(depth_path):
+        return canvas
+    h, w = canvas.shape[:2]
+    depth = np.load(depth_path).astype(np.float32)
+    if depth.shape[:2] != (h, w):
+        depth = cv2.resize(depth, (w, h))
+    depth[seg_mask == 0] = 0.0
+
+    ys_obj, _ = np.where(seg_mask > 0)
+    if len(ys_obj) == 0:
+        return canvas
+    y_top = int(ys_obj.min())
+    y_bot = int(ys_obj.max())
+
+    # Upper 45% of garment is where knots/wraps form.
+    y_knot_end = y_top + int(0.45 * max(1, y_bot - y_top))
+    upper_mask = np.zeros_like(seg_mask)
+    upper_mask[y_top:y_knot_end, :] = seg_mask[y_top:y_knot_end, :]
+    if not np.any(upper_mask):
+        return canvas
+
+    # Local depth variance over a ~21px window — peaks at knot centres.
+    ksize = (21, 21)
+    mean_d  = cv2.boxFilter(depth,        cv2.CV_32F, ksize)
+    mean_d2 = cv2.boxFilter(depth ** 2,   cv2.CV_32F, ksize)
+    local_var = np.maximum(0.0, mean_d2 - mean_d ** 2)
+    local_var[upper_mask == 0] = 0.0
+
+    obj_var = local_var[upper_mask > 0]
+    if obj_var.size == 0:
+        return canvas
+
+    # Knot region = top 30% by local depth variance.
+    knot_region = (local_var >= float(np.percentile(obj_var, 70))) & (upper_mask > 0)
+    knot_mask = (knot_region.astype(np.uint8) * 255)
+    knot_mask = cv2.erode(knot_mask, np.ones((5, 5), np.uint8), iterations=1)
+    if not np.any(knot_mask):
+        return canvas
+
+    # Within the knot region, draw depth-gradient edges at a relaxed threshold
+    # (top 50% rather than top 5%) so the internal fold structure is visible.
+    depth_s = cv2.GaussianBlur(depth, (5, 5), 1.0)
+    gx = cv2.Sobel(depth_s, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(depth_s, cv2.CV_32F, 0, 1, ksize=3)
+    grad = np.sqrt(gx ** 2 + gy ** 2)
+    mx = grad.max()
+    if mx < 1e-6:
+        return canvas
+    grad_u8 = (grad / mx * 255).astype(np.uint8)
+    grad_u8[knot_mask == 0] = 0
+
+    obj_kg = grad_u8[knot_mask > 0]
+    thresh = float(np.percentile(obj_kg, 50)) if obj_kg.size > 0 else 128.0
+    _, strong = cv2.threshold(grad_u8, int(thresh), 255, cv2.THRESH_BINARY)
+    strong = cv2.dilate(strong, np.ones((thickness, thickness), np.uint8), iterations=1)
+    canvas[strong > 0] = color_bgr
+    return canvas
+
+
 def draw_occlusion_edges(
     canvas:     np.ndarray,
     seg_mask:   np.ndarray,

@@ -11,7 +11,16 @@ shadows, features, drawing, batch runner). Run from project root:
 See module docstrings there for HED/SAM optional models and env vars.
 """
 
+import argparse
+
 from cloth_pipeline.sketch import run_from_metadata
 
 if __name__ == "__main__":
-    run_from_metadata()
+    parser = argparse.ArgumentParser(description="Generate conditioning sketches from renders.")
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Output directory for conditioning images (default: dataset/conditioning).",
+    )
+    args = parser.parse_args()
+    run_from_metadata(output_dir=args.output_dir)
