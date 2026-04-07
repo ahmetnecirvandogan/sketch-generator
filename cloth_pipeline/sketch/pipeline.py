@@ -15,11 +15,12 @@ from cloth_pipeline.sketch.drawing import (
     draw_annotations,
     draw_depth_layer_boundary,
     draw_occlusion_edges,
+    draw_shade_marks,
     draw_wobbly_contour,
     measure_top_left_text_pad,
 )
 from cloth_pipeline.sketch.edges import detect_edges
-from cloth_pipeline.sketch.features import detect_dominant_color
+from cloth_pipeline.sketch.features import detect_dominant_color, find_feature_points
 from cloth_pipeline.sketch.segmentation import get_object_mask
 
 
@@ -199,6 +200,9 @@ def generate_sketch(
                     canvas, cnt, SKETCH_BGR,
                     base_thickness=1.0, wobble_amp=0.0, wobble_freq=2,
                 )
+
+    features_pts = find_feature_points(img_bgr, seg_mask)
+    draw_shade_marks(canvas, features_pts, SKETCH_BGR)
 
     # ── Colour detection for text ─────────────────────────────────────────────
     dominant_color = detect_dominant_color(img_bgr, seg_mask)

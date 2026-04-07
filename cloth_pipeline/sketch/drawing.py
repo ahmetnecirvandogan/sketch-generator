@@ -822,6 +822,62 @@ def albedo_pattern_stroke_mask(
 # STEP D — ANNOTATION  (text block + 4 labeled arrows)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _draw_thin_asterisk(
+    draw: ImageDraw.Draw,
+    cx: float,
+    cy: float,
+    arm: float,
+    color: tuple,
+    *,
+    line_width: int = 3,
+) -> None:
+    """Three 60°-spaced strokes through the centre (keyboard-style ``*``)."""
+    for deg in (90.0, 30.0, 150.0):
+        a = math.radians(deg)
+        ca, sa = math.cos(a), math.sin(a)
+        draw.line(
+            [
+                (cx - arm * ca, cy - arm * sa),
+                (cx + arm * ca, cy + arm * sa),
+            ],
+            fill=color,
+            width=line_width,
+        )
+
+
+def draw_shade_marks(
+    canvas_bgr: np.ndarray,
+    features: dict,
+    color_bgr: tuple,
+    *,
+    font_size: int = 22,
+) -> np.ndarray:
+    """
+    Draw ``#`` at each shadow site and ``*`` at each highlight site on the sketch
+    raster (see ``find_feature_points`` lists ``shadows`` / ``highlights``).
+    ``*`` is drawn as three vector strokes (3 px wide) sized to match ``#`` in span
+    without the heavy filled TrueType asterisk.
+    Ink only (no white halo) so underlying strokes stay visible except under
+    the glyph itself.
+    """
+    pil = Image.fromarray(cv2.cvtColor(canvas_bgr, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(pil)
+    font_hash = resolve_font(font_size)
+    # Match overall * span to #; arm length derived from the same scale we used for font *.
+    star_size = min(56, max(font_size + 4, int(round(font_size * 1.52))))
+    arm = max(6.5, star_size * 0.36)
+    rgb = (int(color_bgr[2]), int(color_bgr[1]), int(color_bgr[0]))
+    for pt in features.get("shadows") or []:
+        x, y = int(pt[0]), int(pt[1])
+        draw.text((x, y), "#", font=font_hash, fill=rgb, anchor="mm")
+    for pt in features.get("highlights") or []:
+        x, y = float(pt[0]), float(pt[1])
+        _draw_thin_asterisk(draw, x, y, arm, rgb, line_width=3)
+    out = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
+    canvas_bgr[:] = out
+    return canvas_bgr
+
+
 def _bezier_quadratic(
     p0: tuple, p1: tuple, p2: tuple, n_pts: int = 18
 ) -> list:
@@ -952,13 +1008,12 @@ def draw_annotations(
       • Text block       (top-left, font 18): material, object + colour, texture.
       • "Segmentation    (top-centre, font 18): arrow pointing to the top of
         Mask"             the dashed rectangular boundary.
-      • "Highlight"      (font 18): small outlined circle at the highlight
-                         centroid + label at right canvas edge.
-      • "Shadow"         (font 22): label at left canvas edge, arrow to the
-                         hatched shadow zone.
+
+    Highlight / shadow are marked on the garment with ``*`` and ``#`` at each
+    detected in-garment site (see ``draw_shade_marks`` / ``find_feature_points``).
 
     ``sketch_content_top`` — y coordinate where the sketch raster begins; keeps
-    the Highlight label from being pulled up into the reserved text band.
+    annotations aligned with the placed sketch content.
     """
     W, H    = canvas_wh
     margin  = 18
