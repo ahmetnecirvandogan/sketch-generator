@@ -83,7 +83,7 @@ def generate_sketch(
     render_path:    str,
     obj_name:       str,
     material_label: str,
-    keyword:        str,
+    texture_label:  str,
     *,
     alpha_mask_path: str | None = None,
     albedo_map_path: str | None = None,
@@ -214,7 +214,7 @@ def generate_sketch(
     text_lines = [
         f"Material: {mat_display}",
         f"Object: {short_name} ({dominant_color})",
-        f"Key word: {keyword}",
+        f"Texture: {texture_label}",
     ]
     pad_left, pad_top = measure_top_left_text_pad(text_lines)
     # Keep a generous text band at top-left, but trim the opposite margins so

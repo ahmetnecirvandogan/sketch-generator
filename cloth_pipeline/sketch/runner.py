@@ -44,6 +44,18 @@ def _pattern_name_from_meta(meta: dict) -> str | None:
     return meta.get("pattern_name") or meta.get("texture_pattern")
 
 
+def _texture_label_from_meta(meta: dict) -> str:
+    """Caption for the third annotation line (pattern-first, e.g. Stripes)."""
+    raw = _pattern_name_from_meta(meta)
+    if raw is not None and str(raw).strip():
+        s = str(raw).replace("_", " ").strip()
+        return s.title() if s else "Plain"
+    kw = meta.get("keyword")
+    if kw is not None and str(kw).strip():
+        return str(kw).strip()
+    return "Plain"
+
+
 def run_from_metadata(*, output_dir: str | None = None) -> None:
     ensure_sketch_stage_dirs()
     condition_dir = output_dir or CONDITION_DIR
@@ -69,7 +81,7 @@ def run_from_metadata(*, output_dir: str | None = None) -> None:
             continue
 
         raw_text = meta.get("text", "")
-        keyword  = meta.get("keyword") or "fabric pattern"
+        texture_label = _texture_label_from_meta(meta)
         material_label = _material_label_from_meta(meta)
         obj_name = "Wool Scarf" if "wool" in raw_text.lower() else "Cloth"
 
@@ -87,7 +99,7 @@ def run_from_metadata(*, output_dir: str | None = None) -> None:
                 render_path,
                 obj_name,
                 material_label,
-                keyword,
+                texture_label,
                 alpha_mask_path=alpha_mask_path,
                 albedo_map_path=albedo_map_path,
                 albedo_tiling=_albedo_tiling_from_meta(meta),

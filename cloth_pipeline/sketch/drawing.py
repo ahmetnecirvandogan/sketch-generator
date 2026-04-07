@@ -949,7 +949,7 @@ def draw_annotations(
     """
     Full annotation layout matching the Zahra / fashion-flat sketch grammar:
 
-      • Text block       (top-left, font 18): material, object + colour, keyword.
+      • Text block       (top-left, font 18): material, object + colour, texture.
       • "Segmentation    (top-centre, font 18): arrow pointing to the top of
         Mask"             the dashed rectangular boundary.
       • "Highlight"      (font 18): small outlined circle at the highlight
@@ -992,7 +992,7 @@ def draw_annotations(
         draw.text((lx, ly), text, font=font_sm, fill=color, **HALO)
         _draw_arrow(draw, (lx - 6, ly + 10), feat, color, width=2)
 
-    # ── Text block (top-left): material, object/colour, keyword ──────────────
+    # ── Text block (top-left): material, object/colour, texture ────────────────
     y = margin
     for line in text_lines:
         draw.text((margin, y), line, font=font_sm, fill=color, **HALO)
