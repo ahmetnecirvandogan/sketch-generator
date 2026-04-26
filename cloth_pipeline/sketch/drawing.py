@@ -948,8 +948,8 @@ def draw_shade_marks(
     """
     pil = Image.fromarray(cv2.cvtColor(canvas_bgr, cv2.COLOR_BGR2RGB))
     draw = ImageDraw.Draw(pil)
-    # Make shadow crescent intentionally larger than sparkle for readability.
-    crescent_r = max(10.0, font_size * 0.72)
+    # Keep crescent close to sparkle visual scale.
+    crescent_r = max(7.0, font_size * 0.54)
     star_size = min(56, max(font_size + 4, int(round(font_size * 1.52))))
     arm = max(6.5, star_size * 0.36)
     rgb = (int(color_bgr[2]), int(color_bgr[1]), int(color_bgr[0]))
