@@ -822,7 +822,7 @@ def albedo_pattern_stroke_mask(
 # STEP D — ANNOTATION  (text block + 4 labeled arrows)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _draw_thin_asterisk(
+def _draw_sparkle_icon(
     draw: ImageDraw.Draw,
     cx: float,
     cy: float,
@@ -831,18 +831,104 @@ def _draw_thin_asterisk(
     *,
     line_width: int = 3,
 ) -> None:
-    """Three 60°-spaced strokes through the centre (keyboard-style ``*``)."""
-    for deg in (90.0, 30.0, 150.0):
-        a = math.radians(deg)
-        ca, sa = math.cos(a), math.sin(a)
-        draw.line(
-            [
-                (cx - arm * ca, cy - arm * sa),
-                (cx + arm * ca, cy + arm * sa),
-            ],
-            fill=color,
-            width=line_width,
-        )
+    """Curved four-point sparkle outline similar to iconography references."""
+    rx = arm * 1.05
+    ry = arm * 1.22
+    tips = [
+        (cx, cy - ry),  # top
+        (cx + rx, cy),  # right
+        (cx, cy + ry),  # bottom
+        (cx - rx, cy),  # left
+    ]
+    c = (cx, cy)
+    path: list[tuple[int, int]] = []
+    for i in range(4):
+        p0 = tips[i]
+        p2 = tips[(i + 1) % 4]
+        seg = _bezier_quadratic(p0, c, p2, n_pts=24)
+        if path:
+            path.extend(seg[1:])
+        else:
+            path.extend(seg)
+    if len(path) > 1:
+        path.append(path[0])
+        draw.line(path, fill=color, width=line_width)
+
+
+def _draw_crescent(
+    draw: ImageDraw.Draw,
+    cx: float,
+    cy: float,
+    radius: float,
+    color: tuple,
+    *,
+    line_width: int = 3,
+) -> None:
+    """Reference-like crescent from two offset circular arcs."""
+    # Build a moon-like contour as the overlap-cut of two circles.
+    # This keeps a strong inner curvature and pointed tips at both ends.
+    r_out = radius
+    r_in = radius * 0.92
+    offset = radius * 0.62
+    d = max(1e-4, offset)
+    a = (r_out * r_out - r_in * r_in + d * d) / (2.0 * d)
+    h_sq = max(0.0, r_out * r_out - a * a)
+    h = math.sqrt(h_sq)
+    x0 = cx + a
+    y0 = cy
+    top_tip = (x0, y0 - h)
+    bottom_tip = (x0, y0 + h)
+
+    def _arc_points(
+        ccx: float,
+        ccy: float,
+        rr: float,
+        start_angle: float,
+        end_angle: float,
+        *,
+        n_pts: int,
+        prefer_long: bool,
+    ) -> list[tuple[int, int]]:
+        # Start from shortest angular delta, optionally flip to the long side.
+        delta = (end_angle - start_angle + math.pi) % (2.0 * math.pi) - math.pi
+        if prefer_long:
+            delta = delta - 2.0 * math.pi if delta >= 0.0 else delta + 2.0 * math.pi
+        pts: list[tuple[int, int]] = []
+        for i in range(n_pts + 1):
+            t = start_angle + delta * (i / n_pts)
+            pts.append((int(round(ccx + rr * math.cos(t))), int(round(ccy + rr * math.sin(t)))))
+        return pts
+
+    a_top_outer = math.atan2(top_tip[1] - cy, top_tip[0] - cx)
+    a_bottom_outer = math.atan2(bottom_tip[1] - cy, bottom_tip[0] - cx)
+    # Outer arc takes the long way around (left/bulging side).
+    outer = _arc_points(
+        cx,
+        cy,
+        r_out,
+        a_top_outer,
+        a_bottom_outer,
+        n_pts=88,
+        prefer_long=True,
+    )
+
+    cx2 = cx + offset
+    a_top_inner = math.atan2(top_tip[1] - cy, top_tip[0] - cx2)
+    a_bottom_inner = math.atan2(bottom_tip[1] - cy, bottom_tip[0] - cx2)
+    # Inner arc takes the short path (right/inward bite).
+    inner = _arc_points(
+        cx2,
+        cy,
+        r_in,
+        a_top_inner,
+        a_bottom_inner,
+        n_pts=72,
+        prefer_long=False,
+    )
+
+    crescent_width = max(line_width, int(round(radius * 0.18)))
+    draw.line(outer, fill=color, width=crescent_width)
+    draw.line(inner, fill=color, width=crescent_width)
 
 
 def draw_shade_marks(
@@ -853,26 +939,26 @@ def draw_shade_marks(
     font_size: int = 22,
 ) -> np.ndarray:
     """
-    Draw ``#`` at each shadow site and ``*`` at each highlight site on the sketch
+    Draw crescent signs at each shadow site and sparkle signs at each highlight site on the sketch
     raster (see ``find_feature_points`` lists ``shadows`` / ``highlights``).
-    ``*`` is drawn as three vector strokes (3 px wide) sized to match ``#`` in span
-    without the heavy filled TrueType asterisk.
+    The sparkle icon is drawn with vector strokes (3 px wide), and shadow uses a
+    vector crescent so no text glyph dependencies are needed.
     Ink only (no white halo) so underlying strokes stay visible except under
     the glyph itself.
     """
     pil = Image.fromarray(cv2.cvtColor(canvas_bgr, cv2.COLOR_BGR2RGB))
     draw = ImageDraw.Draw(pil)
-    font_hash = resolve_font(font_size)
-    # Match overall * span to #; arm length derived from the same scale we used for font *.
+    # Make shadow crescent intentionally larger than sparkle for readability.
+    crescent_r = max(10.0, font_size * 0.72)
     star_size = min(56, max(font_size + 4, int(round(font_size * 1.52))))
     arm = max(6.5, star_size * 0.36)
     rgb = (int(color_bgr[2]), int(color_bgr[1]), int(color_bgr[0]))
     for pt in features.get("shadows") or []:
-        x, y = int(pt[0]), int(pt[1])
-        draw.text((x, y), "#", font=font_hash, fill=rgb, anchor="mm")
+        x, y = float(pt[0]), float(pt[1])
+        _draw_crescent(draw, x, y, crescent_r, rgb, line_width=3)
     for pt in features.get("highlights") or []:
         x, y = float(pt[0]), float(pt[1])
-        _draw_thin_asterisk(draw, x, y, arm, rgb, line_width=3)
+        _draw_sparkle_icon(draw, x, y, arm, rgb, line_width=3)
     out = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
     canvas_bgr[:] = out
     return canvas_bgr
@@ -1009,7 +1095,7 @@ def draw_annotations(
       • "Segmentation    (top-centre, font 18): arrow pointing to the top of
         Mask"             the dashed rectangular boundary.
 
-    Highlight / shadow are marked on the garment with ``*`` and ``#`` at each
+    Highlight / shadow are marked on the garment with sparkle and crescent signs at each
     detected in-garment site (see ``draw_shade_marks`` / ``find_feature_points``).
 
     ``sketch_content_top`` — y coordinate where the sketch raster begins; keeps
