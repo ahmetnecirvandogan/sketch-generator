@@ -84,6 +84,7 @@ def generate_sketch(
     obj_name:       str,
     material_label: str,
     texture_label:  str,
+    include_text:   bool = True,
     *,
     alpha_mask_path: str | None = None,
     albedo_map_path: str | None = None,
@@ -203,6 +204,11 @@ def generate_sketch(
 
     features_pts = find_feature_points(img_bgr, seg_mask)
     draw_shade_marks(canvas, features_pts, SKETCH_BGR)
+
+    # For conditioning-only mode, keep output exactly render-aligned:
+    # no annotation text, no extra canvas, no scaling/repositioning.
+    if not include_text:
+        return canvas
 
     # ── Colour detection for text ─────────────────────────────────────────────
     dominant_color = detect_dominant_color(img_bgr, seg_mask)

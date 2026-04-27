@@ -100,6 +100,7 @@ def run_from_metadata(*, output_dir: str | None = None) -> None:
                 obj_name,
                 material_label,
                 texture_label,
+                include_text=False,
                 alpha_mask_path=alpha_mask_path,
                 albedo_map_path=albedo_map_path,
                 albedo_tiling=_albedo_tiling_from_meta(meta),
