@@ -79,9 +79,9 @@ def find_feature_points(
     """
     Returns:
 
-      • ``highlights`` — list of ``(x, y)`` on the garment for ``*`` markers
+      • ``highlights`` — list of ``(x, y)`` on the garment for sparkle markers
         (one per major bright blob above the 90th percentile).
-      • ``shadows`` — list of ``(x, y)`` for ``#`` markers (darkest ~20th
+      • ``shadows`` — list of ``(x, y)`` for crescent markers (darkest ~20th
         percentile blobs).
       • ``midtone`` — single centroid in the 40th–60th band, or ``None``.
 
