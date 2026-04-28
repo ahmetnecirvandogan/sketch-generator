@@ -18,9 +18,20 @@ CONDITION_DIR = os.path.join(DATASET_DIR, "conditioning")
 METADATA_PATH = os.path.join(DATASET_DIR, "metadata.jsonl")
 FRONT_PREVIEW_DIR = os.path.join(DATASET_DIR, "front_previews")
 
+# PBR ground-truth maps, pixel-aligned with renders/sketches.
+# Albedo + normal come from the Mitsuba AOV pass; roughness is a post-hoc
+# uniform fill from material_props (single BSDF per garment for now).
+PBR_DIR = os.path.join(DATASET_DIR, "pbr")
+PBR_ALBEDO_DIR = os.path.join(PBR_DIR, "albedo")
+PBR_ROUGHNESS_DIR = os.path.join(PBR_DIR, "roughness")
+PBR_NORMAL_DIR = os.path.join(PBR_DIR, "normal")
+
 
 def ensure_dataset_stage_dirs() -> None:
-    for d in (RENDERS_DIR, DEPTH_DIR, NORMALS_DIR, MASKS_DIR, MESHES_DIR, ALBEDO_MAPS_DIR):
+    for d in (
+        RENDERS_DIR, DEPTH_DIR, NORMALS_DIR, MASKS_DIR, MESHES_DIR, ALBEDO_MAPS_DIR,
+        PBR_ALBEDO_DIR, PBR_ROUGHNESS_DIR, PBR_NORMAL_DIR,
+    ):
         os.makedirs(d, exist_ok=True)
 
 
