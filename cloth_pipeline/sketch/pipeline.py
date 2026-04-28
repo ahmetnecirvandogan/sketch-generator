@@ -1,4 +1,9 @@
-"""Render → conditioning sketch (edges, silhouette, hatching, labels)."""
+"""Render → conditioning sketch (edges, silhouette, hatching, glyphs).
+
+Returns a raw render-sized BGR canvas so the sketch is pixel-aligned with the
+beauty render and PBR maps. The decorated text-band variant has been retired
+along with the legacy ``dataset/conditioning/`` output.
+"""
 
 from __future__ import annotations
 
@@ -6,84 +11,23 @@ import os
 
 import cv2
 import numpy as np
-from PIL import Image, ImageDraw
 
 from cloth_pipeline.paths import DATASET_DIR
-from cloth_pipeline.sketch.constants import SKETCH_BGR, SKETCH_RGB, USE_TEXTURE_STROKES
+from cloth_pipeline.sketch.constants import SKETCH_BGR, USE_TEXTURE_STROKES
 from cloth_pipeline.sketch.drawing import (
     albedo_pattern_stroke_mask,
-    draw_annotations,
     draw_depth_layer_boundary,
     draw_occlusion_edges,
     draw_shade_marks,
     draw_wobbly_contour,
-    measure_top_left_text_pad,
 )
 from cloth_pipeline.sketch.edges import detect_edges
-from cloth_pipeline.sketch.features import detect_dominant_color, find_feature_points
+from cloth_pipeline.sketch.features import find_feature_points
 from cloth_pipeline.sketch.segmentation import get_object_mask
 
 
-def _nonwhite_bbox(img_bgr: np.ndarray, threshold: int = 250) -> tuple[int, int, int, int] | None:
-    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-    ys, xs = np.where(gray < threshold)
-    if ys.size == 0:
-        return None
-    return int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())
-
-
-def _place_scaled_content(
-    content_bgr: np.ndarray,
-    out_w: int,
-    out_h: int,
-    *,
-    pad_left: int,
-    pad_top: int,
-    pad_right: int,
-    pad_bottom: int,
-) -> np.ndarray:
-    """
-    Crop to the inked sketch region, scale it up moderately, and place it in
-    the drawable area that remains after reserving the top-left text block.
-    """
-    full = np.full((out_h, out_w, 3), 255, dtype=np.uint8)
-    bbox = _nonwhite_bbox(content_bgr)
-    if bbox is None:
-        full[pad_top : pad_top + content_bgr.shape[0], pad_left : pad_left + content_bgr.shape[1]] = content_bgr
-        return full
-
-    x0, y0, x1, y1 = bbox
-    crop = content_bgr[y0 : y1 + 1, x0 : x1 + 1]
-    ch, cw = crop.shape[:2]
-
-    avail_x0 = max(18, pad_left + 12)
-    avail_y0 = max(18, pad_top + 10)
-    avail_x1 = max(avail_x0 + 1, out_w - pad_right + max(18, pad_right // 3))
-    avail_y1 = max(avail_y0 + 1, out_h - pad_bottom + max(18, pad_bottom // 3))
-    avail_w = max(1, avail_x1 - avail_x0)
-    avail_h = max(1, avail_y1 - avail_y0)
-
-    scale = min(avail_w / float(max(1, cw)), avail_h / float(max(1, ch)), 1.45)
-    if scale <= 0:
-        scale = 1.0
-    new_w = max(1, int(round(cw * scale)))
-    new_h = max(1, int(round(ch * scale)))
-    interp = cv2.INTER_CUBIC if scale > 1.0 else cv2.INTER_AREA
-    placed = cv2.resize(crop, (new_w, new_h), interpolation=interp)
-
-    off_x = avail_x0 + max(0, (avail_w - new_w) // 2)
-    off_y = avail_y0 + max(0, (avail_h - new_h) // 2)
-    region = full[off_y : off_y + new_h, off_x : off_x + new_w]
-    gray = cv2.cvtColor(placed, cv2.COLOR_BGR2GRAY)
-    ink = gray < 250
-    region[ink] = placed[ink]
-    return full
-
 def generate_sketch(
     render_path:    str,
-    obj_name:       str,
-    material_label: str,
-    texture_label:  str,
     *,
     alpha_mask_path: str | None = None,
     albedo_map_path: str | None = None,
@@ -91,19 +35,11 @@ def generate_sketch(
     pattern_name:    str | None = None,
 ) -> np.ndarray:
     """
-    Full render → conditioning sketch pipeline.
+    Render → render-sized BGR sketch canvas (no text band, no rescaling).
 
-    When ``albedo_map_path`` / ``albedo_tiling`` / ``pattern_name`` are set (from
-    dataset metadata), the same procedural albedo PNG used for Mitsuba ``base_color``
-    is tiled and converted to sparse in-mask strokes so pattern is separate from
-    lighting-dependent structure in the RGB render.
-
-    Fabric preset is written in the top-left text block (``material_label``), not
-    as strokes on the cloth. The output canvas adds equal padding on opposite sides
-    (right = left, bottom = top) so the ``w×h`` sketch stays **centred** like the
-    source render, while the top-left quadrant stays clear for captions.
-
-    Returns a BGR uint8 image ready for cv2.imwrite.
+    The returned canvas matches ``render_path``'s width/height exactly, so the
+    sketch is pixel-aligned with the beauty render and the PBR maps written by
+    Stage 1 to ``outputs/<mesh>/view_<idx>/``.
     """
     # Load as BGRA so we can extract the alpha channel saved by generate_dataset.
     # cv2.IMREAD_UNCHANGED preserves all 4 channels when they exist.
@@ -203,50 +139,5 @@ def generate_sketch(
 
     features_pts = find_feature_points(img_bgr, seg_mask)
     draw_shade_marks(canvas, features_pts, SKETCH_BGR)
-
-    # ── Colour detection for text ─────────────────────────────────────────────
-    dominant_color = detect_dominant_color(img_bgr, seg_mask)
-
-    # ── D: Annotation + reserved top-left band ───────────────────────────────
-    mat_display = (
-        material_label.replace(" texture", "").replace(" Texture", "")
-        .replace("Coarse ", "").replace("coarse ", "")
-        .strip()
-    )
-    short_name = obj_name.replace("Wool ", "").replace("wool ", "")
-    text_lines = [
-        f"Material: {mat_display}",
-        f"Object: {short_name} ({dominant_color})",
-        f"Texture: {texture_label}",
-    ]
-    pad_left, pad_top = measure_top_left_text_pad(text_lines)
-    # Keep a generous text band at top-left, but trim the opposite margins so
-    # the scarf takes up more of the page than in earlier versions.
-    pad_right = max(44, int(round(pad_left * 0.42)))
-    pad_bottom = max(40, int(round(pad_top * 0.35)))
-    out_w = pad_left + w + pad_right
-    out_h = pad_top + h + pad_bottom
-    full = _place_scaled_content(
-        canvas,
-        out_w,
-        out_h,
-        pad_left=pad_left,
-        pad_top=pad_top,
-        pad_right=pad_right,
-        pad_bottom=pad_bottom,
-    )
-
-    pil = Image.fromarray(cv2.cvtColor(full, cv2.COLOR_BGR2RGB))
-    draw = ImageDraw.Draw(pil)
-
-    draw_annotations(
-        draw,
-        text_lines,
-        {},
-        canvas_wh=(out_w, out_h),
-        color=SKETCH_RGB,
-        sketch_content_top=pad_top,
-    )
-    canvas = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
 
     return canvas
