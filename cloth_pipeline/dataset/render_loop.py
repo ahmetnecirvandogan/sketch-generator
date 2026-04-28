@@ -114,7 +114,21 @@ def _suppress_mc_sparkles(rgb: np.ndarray) -> np.ndarray:
     return np.clip(rgb * scale[..., None], 0.0, 1.0)
 
 
-def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
+def run_generation(
+    materials_per_mesh: int = 3,
+    lightings_per_material: int = 2,
+) -> None:
+    """Three-level deterministic loop: mesh × (material+pattern) × lighting.
+
+    For each mesh, ``materials_per_mesh`` (material, pattern) combinations are
+    sampled. For each, ``lightings_per_material`` lighting setups are rendered.
+    Mesh, material and pattern are *fixed* across the lighting siblings, so
+    their albedo/normal/roughness GTs are identical and only the sketches
+    (which encode highlight/shadow positions) differ — the disentanglement
+    signal we want for training.
+
+    Total samples = N_meshes × materials_per_mesh × lightings_per_material.
+    """
     ensure_dataset_stage_dirs()
 
     mesh_files = sorted(glob.glob(os.path.join(MESHES_DIR, "*.obj")))
@@ -131,6 +145,18 @@ def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
         print("Please add your cloth meshes to that folder and run again.")
         raise SystemExit(1)
 
+    samples_per_mesh = materials_per_mesh * lightings_per_material
+    num_samples = len(mesh_files) * samples_per_mesh
+    print(
+        f"Generating {len(mesh_files)} meshes × {materials_per_mesh} materials "
+        f"× {lightings_per_material} lightings = {num_samples} samples\n"
+    )
+
+    # (mesh_idx, material_idx) → cached material + pattern + texture, so all
+    # `lightings_per_material` siblings of the same (mesh, material) combo
+    # share bit-identical PBR inputs. Reset per run; in-memory only.
+    material_pattern_cache: dict[tuple[int, int], dict] = {}
+
     # Load existing metadata so we preserve it when skipping frames
     existing_metadata = {}
     if os.path.exists(METADATA_PATH):
@@ -139,6 +165,38 @@ def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
                 if ln.strip():
                     rec = json.loads(ln)
                     existing_metadata[rec["frame"]] = rec
+
+    # Pre-populate the material+pattern cache from existing metadata so that a
+    # mid-run restart (e.g. after a Mitsuba segfault) reuses the SAME material
+    # and texture for the second lighting sibling instead of re-rolling. Without
+    # this, the (mesh, material+pattern) → lighting-pair invariant is violated.
+    for rec in existing_metadata.values():
+        if "mesh_idx" not in rec or "material_idx" not in rec:
+            continue
+        cache_key = (int(rec["mesh_idx"]), int(rec["material_idx"]))
+        if cache_key in material_pattern_cache:
+            continue
+        tex_rel = rec.get("albedo_map")
+        tex_path = os.path.join(DATASET_DIR, tex_rel) if tex_rel else None
+        if not tex_path or not os.path.exists(tex_path):
+            continue
+        props = rec.get("material_props") or {}
+        tiling = rec.get("albedo_tiling") or [1.0, 1.0]
+        material_pattern_cache[cache_key] = {
+            "material_desc":   rec.get("material_type"),
+            "roughness":       float(props.get("roughness", 0.5)),
+            "specular":        float(props.get("specular", 0.5)),
+            "sheen":           float(props.get("sheen", 0.5)),
+            "sheen_tint":      float(props.get("sheen_tint", 0.5)),
+            "anisotropic":     float(props.get("anisotropic", 0.0)),
+            "spec_trans":      float(props.get("spec_trans", 0.0)),
+            "clearcoat":       float(props.get("clearcoat", 0.0)),
+            "tex_path":        tex_path,
+            "pattern_name":    rec.get("pattern_name", "solid"),
+            "pattern_params":  rec.get("pattern_params", {}),
+            "tile_u":          float(tiling[0]),
+            "tile_v":          float(tiling[1]),
+        }
 
     metadata_records = []
 
@@ -192,8 +250,14 @@ def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
         )
 
         # -----------------------------------------------------------------------
-        # Randomise Geometry (optional: pin mesh when regenerating one frame)
+        # Three-level index: outer mesh / middle material / inner lighting.
+        # Optional env override pins one frame to a specific mesh stem.
         # -----------------------------------------------------------------------
+        mesh_idx = i // samples_per_mesh
+        within_mesh = i % samples_per_mesh
+        material_idx = within_mesh // lightings_per_material
+        lighting_idx = within_mesh % lightings_per_material
+
         only_frame_env = os.environ.get("NECH_ONLY_FRAME", "").strip()
         force_stem = os.environ.get("NECH_FORCE_MESH_STEM", "").strip()
         pin_idx: int | None = None
@@ -210,7 +274,7 @@ def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
                 )
             current_mesh_path = forced_path
         else:
-            current_mesh_path = random.choice(mesh_files)
+            current_mesh_path = mesh_files[mesh_idx]
         mesh_name = os.path.basename(current_mesh_path).replace(".obj", "")
 
         # Calculate bounding box for this specific mesh to frame it correctly
@@ -375,45 +439,75 @@ def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
             },
         }
 
-        material_desc = random.choice(list(FABRIC_PRESETS.keys()))
-        preset = FABRIC_PRESETS[material_desc]
+        # Material + pattern is cached per (mesh_idx, material_idx) so all
+        # lighting siblings within a (mesh, material) group reuse the same
+        # BRDF parameters AND the same procedural texture file → byte-identical
+        # albedo/normal/roughness PBR ground truth.
+        cache_key = (mesh_idx, material_idx)
+        if cache_key not in material_pattern_cache:
+            material_desc = random.choice(list(FABRIC_PRESETS.keys()))
+            preset = FABRIC_PRESETS[material_desc]
 
-        def _sample(key):
-            lo, hi = preset[key]
-            return random.uniform(lo, hi)
+            def _sample(key, _p=preset):
+                lo, hi = _p[key]
+                return random.uniform(lo, hi)
 
-        roughness   = _sample('roughness')
-        specular    = _sample('specular')
-        sheen       = _sample('sheen')
-        sheen_tint  = _sample('sheen_tint')
-        anisotropic = _sample('anisotropic')
-        spec_trans  = _sample('spec_trans')
-        clearcoat   = _sample('clearcoat')
+            tex_path, pattern_name, pattern_params = generate_random_albedo_map(frame_str)
 
-        keyword = f"{material_desc} pattern"
+            # Analyse mesh UV range to choose a tiling factor that makes the pattern
+            # repeat at a visually sensible scale regardless of how the OBJ was UV-unwrapped.
+            uv_u_range, uv_v_range = 1.0, 1.0
+            try:
+                with open(current_mesh_path) as _mf:
+                    _us, _vs = [], []
+                    for _line in _mf:
+                        if _line.startswith('vt '):
+                            _parts = _line.split()
+                            _us.append(float(_parts[1]))
+                            _vs.append(float(_parts[2]))
+                    if _us:
+                        uv_u_range = max(_us) - min(_us)
+                        uv_v_range = max(_vs) - min(_vs)
+            except Exception:
+                pass
 
-        tex_path, pattern_name, pattern_params = generate_random_albedo_map(frame_str)
+            desired_repeats = random.uniform(3.0, 6.0)
 
-        # Analyse mesh UV range to choose a tiling factor that makes the pattern
-        # repeat at a visually sensible scale regardless of how the OBJ was UV-unwrapped.
-        uv_u_range, uv_v_range = 1.0, 1.0
-        try:
-            with open(current_mesh_path) as _mf:
-                _us, _vs = [], []
-                for _line in _mf:
-                    if _line.startswith('vt '):
-                        _parts = _line.split()
-                        _us.append(float(_parts[1]))
-                        _vs.append(float(_parts[2]))
-                if _us:
-                    uv_u_range = max(_us) - min(_us)
-                    uv_v_range = max(_vs) - min(_vs)
-        except Exception:
-            pass
+            material_pattern_cache[cache_key] = {
+                'material_desc':   material_desc,
+                'roughness':       _sample('roughness'),
+                'specular':        _sample('specular'),
+                'sheen':           _sample('sheen'),
+                'sheen_tint':      _sample('sheen_tint'),
+                'anisotropic':     _sample('anisotropic'),
+                'spec_trans':      _sample('spec_trans'),
+                'clearcoat':       _sample('clearcoat'),
+                'tex_path':        tex_path,
+                'pattern_name':    pattern_name,
+                'pattern_params':  pattern_params,
+                'tile_u':          desired_repeats / max(uv_u_range, 0.01),
+                'tile_v':          desired_repeats / max(uv_v_range, 0.01),
+            }
 
-        desired_repeats = random.uniform(3.0, 6.0)
-        tile_u = desired_repeats / max(uv_u_range, 0.01)
-        tile_v = desired_repeats / max(uv_v_range, 0.01)
+        mp = material_pattern_cache[cache_key]
+        material_desc   = mp['material_desc']
+        roughness       = mp['roughness']
+        specular        = mp['specular']
+        sheen           = mp['sheen']
+        sheen_tint      = mp['sheen_tint']
+        anisotropic     = mp['anisotropic']
+        spec_trans      = mp['spec_trans']
+        clearcoat       = mp['clearcoat']
+        tex_path        = mp['tex_path']
+        pattern_name    = mp['pattern_name']
+        pattern_params  = mp['pattern_params']
+        tile_u          = mp['tile_u']
+        tile_v          = mp['tile_v']
+        keyword         = f"{material_desc} pattern"
+        prompt = (
+            f"a photorealistic 3D render of a {material_desc} cloth with "
+            f"{pattern_name} pattern, physical rendering, detailed fabric folds"
+        )
 
         base_color_spec = {
             'type': 'bitmap',
@@ -421,11 +515,6 @@ def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
             'wrap_mode': 'repeat',
             'to_uv': mi.ScalarTransform3f.scale([tile_u, tile_v]),
         }
-
-        prompt = (
-            f"a photorealistic 3D render of a {material_desc} cloth with "
-            f"{pattern_name} pattern, physical rendering, detailed fabric folds"
-        )
 
         # -----------------------------------------------------------------------
         # Build Mitsuba Scene
@@ -677,6 +766,9 @@ def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
             "albedo_tiling":      [tile_u, tile_v],
             # ── Mesh / material+pattern / view / sample hierarchy ──
             "frame_id":                  frame_id,
+            "mesh_idx":                  mesh_idx,
+            "material_idx":              material_idx,
+            "lighting_idx":              lighting_idx,
             "mesh_dir_name":             sample_parts["mesh_dir_name"],
             "material_pattern_dir_name": sample_parts["material_pattern_dir_name"],
             "view_idx":                  view_idx,
