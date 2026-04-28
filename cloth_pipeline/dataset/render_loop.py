@@ -114,7 +114,11 @@ def _suppress_mc_sparkles(rgb: np.ndarray) -> np.ndarray:
     return np.clip(rgb * scale[..., None], 0.0, 1.0)
 
 
-def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
+def run_generation(variations_per_mesh: int = 3) -> None:
+    """For each mesh in cloth_meshes/, render ``variations_per_mesh`` samples
+    with random material/pattern/lighting. Mesh and camera are fixed; everything
+    else is randomised per variation. Total samples = N_meshes × variations_per_mesh.
+    """
     ensure_dataset_stage_dirs()
 
     mesh_files = sorted(glob.glob(os.path.join(MESHES_DIR, "*.obj")))
@@ -130,6 +134,12 @@ def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
         print(f"[ERROR] No .obj files found in {MESHES_DIR}.")
         print("Please add your cloth meshes to that folder and run again.")
         raise SystemExit(1)
+
+    num_samples = len(mesh_files) * variations_per_mesh
+    print(
+        f"Generating {len(mesh_files)} meshes × {variations_per_mesh} variations "
+        f"= {num_samples} samples\n"
+    )
 
     # Load existing metadata so we preserve it when skipping frames
     existing_metadata = {}
@@ -192,8 +202,12 @@ def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
         )
 
         # -----------------------------------------------------------------------
-        # Randomise Geometry (optional: pin mesh when regenerating one frame)
+        # Mesh: deterministic outer iteration (sorted), inner = variation index.
+        # Optional env override pins one frame to a specific mesh stem.
         # -----------------------------------------------------------------------
+        mesh_idx = i // variations_per_mesh
+        variation_idx = i % variations_per_mesh
+
         only_frame_env = os.environ.get("NECH_ONLY_FRAME", "").strip()
         force_stem = os.environ.get("NECH_FORCE_MESH_STEM", "").strip()
         pin_idx: int | None = None
@@ -210,7 +224,7 @@ def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
                 )
             current_mesh_path = forced_path
         else:
-            current_mesh_path = random.choice(mesh_files)
+            current_mesh_path = mesh_files[mesh_idx]
         mesh_name = os.path.basename(current_mesh_path).replace(".obj", "")
 
         # Calculate bounding box for this specific mesh to frame it correctly
@@ -677,6 +691,8 @@ def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
             "albedo_tiling":      [tile_u, tile_v],
             # ── Mesh / material+pattern / view / sample hierarchy ──
             "frame_id":                  frame_id,
+            "mesh_idx":                  mesh_idx,
+            "variation_idx":             variation_idx,
             "mesh_dir_name":             sample_parts["mesh_dir_name"],
             "material_pattern_dir_name": sample_parts["material_pattern_dir_name"],
             "view_idx":                  view_idx,

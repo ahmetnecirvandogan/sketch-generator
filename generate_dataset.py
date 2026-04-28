@@ -30,8 +30,15 @@ if __name__ == "__main__":
         default=None,
         help="With --front-previews: only render cloth_meshes/STEM.obj (no .obj suffix).",
     )
+    parser.add_argument(
+        "--variations-per-mesh",
+        type=int,
+        default=3,
+        metavar="N",
+        help="Number of randomised variations per mesh (default: 3).",
+    )
     args = parser.parse_args()
     if args.front_previews:
         run_front_mesh_previews(only_stem=args.front_preview_only)
     else:
-        run_generation()
+        run_generation(variations_per_mesh=args.variations_per_mesh)
