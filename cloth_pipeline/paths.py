@@ -1,6 +1,7 @@
 """Project-root paths used by Stage 1 (dataset) and Stage 2 (sketches)."""
 
 import os
+import re
 
 _PKG_DIR = os.path.dirname(os.path.abspath(__file__))
 BASE_DIR = os.path.dirname(_PKG_DIR)
@@ -14,30 +15,69 @@ MASKS_DIR = os.path.join(DATASET_DIR, "masks")
 # Procedural albedo / pattern maps (Mitsuba base_color). Folder name is historical.
 ALBEDO_MAPS_DIR = os.path.join(DATASET_DIR, "textures")
 TEXTURES_DIR = ALBEDO_MAPS_DIR  # deprecated alias — same path as ALBEDO_MAPS_DIR
-CONDITION_DIR = os.path.join(DATASET_DIR, "conditioning")
 METADATA_PATH = os.path.join(DATASET_DIR, "metadata.jsonl")
 FRONT_PREVIEW_DIR = os.path.join(DATASET_DIR, "front_previews")
 
-# PBR ground-truth maps, pixel-aligned with renders/sketches.
-# Albedo + normal come from the Mitsuba AOV pass; roughness is a post-hoc
-# uniform fill from material_props (single BSDF per garment for now).
-PBR_DIR = os.path.join(DATASET_DIR, "pbr")
-PBR_ALBEDO_DIR = os.path.join(PBR_DIR, "albedo")
-PBR_ROUGHNESS_DIR = os.path.join(PBR_DIR, "roughness")
-PBR_NORMAL_DIR = os.path.join(PBR_DIR, "normal")
+# Training-ready outputs (sketch + PBR maps), grouped per mesh / view.
+# Stage 1 writes albedo/normal/roughness here; Stage 2 writes sketch here.
+# Layout: outputs/mesh_<sanitized_stem>/view_<idx>/{sketch,albedo,normal,roughness}.png
+OUTPUTS_DIR = os.path.join(BASE_DIR, "outputs")
+
+
+def sanitize_mesh_name(stem: str) -> str:
+    """Lowercase + collapse non-alphanumeric runs to underscores; strip edges.
+    Generic enough to use for any path component (mesh, material, pattern)."""
+    s = stem.lower()
+    s = re.sub(r"[^a-z0-9]+", "_", s)
+    return s.strip("_")
+
+
+def sample_dir_components(
+    mesh_path: str,
+    material_type: str,
+    pattern_name: str,
+    view_idx: int,
+    frame_id: int,
+) -> dict:
+    """Named pieces of the per-sample output directory; mirror these into metadata."""
+    mesh_stem = os.path.splitext(os.path.basename(mesh_path))[0]
+    return {
+        "mesh_dir_name": f"mesh_{sanitize_mesh_name(mesh_stem)}",
+        "material_pattern_dir_name": (
+            f"{sanitize_mesh_name(material_type)}_{sanitize_mesh_name(pattern_name)}"
+        ),
+        "view_idx": int(view_idx),
+        "sample_dir_name": f"sample_{int(frame_id):04d}",
+    }
+
+
+def output_sample_dir(
+    mesh_path: str,
+    material_type: str,
+    pattern_name: str,
+    view_idx: int,
+    frame_id: int,
+) -> str:
+    """Absolute path to the per-(mesh, material+pattern, view, frame) directory."""
+    parts = sample_dir_components(mesh_path, material_type, pattern_name, view_idx, frame_id)
+    return os.path.join(
+        OUTPUTS_DIR,
+        parts["mesh_dir_name"],
+        parts["material_pattern_dir_name"],
+        f"view_{parts['view_idx']}",
+        parts["sample_dir_name"],
+    )
 
 
 def ensure_dataset_stage_dirs() -> None:
+    """Create flat intermediate dirs + the outputs/ root (per-mesh subdirs are
+    created on demand at write time)."""
     for d in (
-        RENDERS_DIR, DEPTH_DIR, NORMALS_DIR, MASKS_DIR, MESHES_DIR, ALBEDO_MAPS_DIR,
-        PBR_ALBEDO_DIR, PBR_ROUGHNESS_DIR, PBR_NORMAL_DIR,
+        RENDERS_DIR, DEPTH_DIR, NORMALS_DIR, MASKS_DIR, MESHES_DIR,
+        ALBEDO_MAPS_DIR, OUTPUTS_DIR,
     ):
         os.makedirs(d, exist_ok=True)
 
 
 def ensure_front_preview_dir() -> None:
     os.makedirs(FRONT_PREVIEW_DIR, exist_ok=True)
-
-
-def ensure_sketch_stage_dirs() -> None:
-    os.makedirs(CONDITION_DIR, exist_ok=True)

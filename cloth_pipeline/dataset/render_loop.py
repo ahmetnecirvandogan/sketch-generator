@@ -14,6 +14,7 @@ import numpy as np
 
 from cloth_pipeline.dataset.textures import generate_random_albedo_map
 from cloth_pipeline.paths import (
+    BASE_DIR,
     DATASET_DIR,
     DEPTH_DIR,
     FRONT_PREVIEW_DIR,
@@ -21,12 +22,12 @@ from cloth_pipeline.paths import (
     MESHES_DIR,
     METADATA_PATH,
     NORMALS_DIR,
-    PBR_ALBEDO_DIR,
-    PBR_NORMAL_DIR,
-    PBR_ROUGHNESS_DIR,
+    OUTPUTS_DIR,
     RENDERS_DIR,
     ensure_dataset_stage_dirs,
     ensure_front_preview_dir,
+    output_sample_dir,
+    sample_dir_components,
 )
 
 mi.set_variant("scalar_rgb")
@@ -143,13 +144,10 @@ def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
 
     existing = sum(
         1 for j in range(num_samples)
-        if os.path.exists(os.path.join(RENDERS_DIR,       f"render_{j:04d}.png"))
-        and os.path.exists(os.path.join(DEPTH_DIR,        f"depth_{j:04d}.npy"))
-        and os.path.exists(os.path.join(NORMALS_DIR,      f"normals_{j:04d}.npy"))
-        and os.path.exists(os.path.join(MASKS_DIR,        f"mask_{j:04d}.png"))
-        and os.path.exists(os.path.join(PBR_ALBEDO_DIR,   f"albedo_{j:04d}.png"))
-        and os.path.exists(os.path.join(PBR_ROUGHNESS_DIR, f"roughness_{j:04d}.png"))
-        and os.path.exists(os.path.join(PBR_NORMAL_DIR,   f"normal_{j:04d}.png"))
+        if os.path.exists(os.path.join(RENDERS_DIR,  f"render_{j:04d}.png"))
+        and os.path.exists(os.path.join(DEPTH_DIR,   f"depth_{j:04d}.npy"))
+        and os.path.exists(os.path.join(NORMALS_DIR, f"normals_{j:04d}.npy"))
+        and os.path.exists(os.path.join(MASKS_DIR,   f"mask_{j:04d}.png"))
     )
     print(f"Checkpoint: {existing}/{num_samples} frames already done, resuming.\n")
     print(
@@ -164,29 +162,29 @@ def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
     )
 
     for i in range(num_samples):
-        frame_str          = f"{i:04d}"
-        render_path        = os.path.join(RENDERS_DIR,        f"render_{frame_str}.png")
-        depth_path         = os.path.join(DEPTH_DIR,          f"depth_{frame_str}.npy")
-        normals_path       = os.path.join(NORMALS_DIR,        f"normals_{frame_str}.npy")
-        mask_path          = os.path.join(MASKS_DIR,          f"mask_{frame_str}.png")
-        pbr_albedo_path    = os.path.join(PBR_ALBEDO_DIR,     f"albedo_{frame_str}.png")
-        pbr_roughness_path = os.path.join(PBR_ROUGHNESS_DIR,  f"roughness_{frame_str}.png")
-        pbr_normal_path    = os.path.join(PBR_NORMAL_DIR,     f"normal_{frame_str}.png")
+        frame_str    = f"{i:04d}"
+        render_path  = os.path.join(RENDERS_DIR,  f"render_{frame_str}.png")
+        depth_path   = os.path.join(DEPTH_DIR,    f"depth_{frame_str}.npy")
+        normals_path = os.path.join(NORMALS_DIR,  f"normals_{frame_str}.npy")
+        mask_path    = os.path.join(MASKS_DIR,    f"mask_{frame_str}.png")
 
-        # --- CHECKPOINT: skip frames that are fully complete (and have metadata) ---
-        if (os.path.exists(render_path)
+        # --- CHECKPOINT: skip when intermediates + recorded PBR sample dir
+        # all exist. The mesh+material+pattern combination chosen for a frame
+        # is random, so we read the recorded paths straight from metadata. ---
+        if (frame_str in existing_metadata
+                and os.path.exists(render_path)
                 and os.path.exists(depth_path)
                 and os.path.exists(normals_path)
-                and os.path.exists(mask_path)
-                and os.path.exists(pbr_albedo_path)
-                and os.path.exists(pbr_roughness_path)
-                and os.path.exists(pbr_normal_path)):
-            if frame_str in existing_metadata:
-                metadata_records.append(existing_metadata[frame_str])
+                and os.path.exists(mask_path)):
+            rec = existing_metadata[frame_str]
+            rec_paths = [rec.get("pbr_albedo"), rec.get("pbr_normal"), rec.get("pbr_roughness")]
+            if all(rec_paths) and all(
+                os.path.exists(os.path.join(BASE_DIR, p)) for p in rec_paths
+            ):
+                metadata_records.append(rec)
                 print(f"  [{i+1:>4}/{num_samples}] Skipping {frame_str} (already exists)")
                 continue
-            # No metadata for this frame — must re-render to populate it
-            print(f"  [{i+1:>4}/{num_samples}] Re-rendering {frame_str} (missing metadata)")
+            print(f"  [{i+1:>4}/{num_samples}] Re-rendering {frame_str} (PBR outputs missing)")
 
         print(
             f"  [{i+1:>4}/{num_samples}] Frame {frame_str}: setup (mesh, lights, materials)…",
@@ -591,13 +589,27 @@ def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
         np.save(normals_path, normals_np.astype(np.float32))
 
         # -----------------------------------------------------------------------
-        # PBR ground-truth maps (Hybrid A + C)
-        #   • albedo  → Mitsuba aov:albedo channels 8-10 (linear RGB), masked
-        #   • normal  → re-encode normals_np from [-1,1] → [0,255] RGB, masked
-        #   • roughness → uniform fill from BSDF scalar × mask (Design C, post-hoc)
-        # All three are masked so the background is black and the cloth pixels
-        # carry the GT values. They share the camera/resolution of `render_path`.
+        # PBR ground-truth maps → outputs/mesh_<stem>/<material>_<pattern>/view_<idx>/sample_<frame>/
+        #   • albedo.png    → Mitsuba aov:albedo channels 8-10 (linear RGB), masked
+        #   • normal.png    → re-encode normals_np from [-1,1] → [0,255] RGB, masked
+        #   • roughness.png → uniform fill from BSDF scalar × mask (Design C, post-hoc)
+        # The per-sample frame folder makes every frame collision-free, so two
+        # frames picking the same (mesh, material, pattern, view) live side by
+        # side as different lighting variations.
         # -----------------------------------------------------------------------
+        view_idx = 0  # multi-view rendering not implemented yet
+        frame_id = i
+        sample_parts = sample_dir_components(
+            current_mesh_path, material_desc, pattern_name, view_idx, frame_id
+        )
+        sample_out_dir = output_sample_dir(
+            current_mesh_path, material_desc, pattern_name, view_idx, frame_id
+        )
+        os.makedirs(sample_out_dir, exist_ok=True)
+        pbr_albedo_path    = os.path.join(sample_out_dir, "albedo.png")
+        pbr_normal_path    = os.path.join(sample_out_dir, "normal.png")
+        pbr_roughness_path = os.path.join(sample_out_dir, "roughness.png")
+
         if render_np.shape[2] >= 11:
             albedo_np = np.clip(render_np[:, :, 8:11], 0.0, 1.0)
         else:
@@ -663,10 +675,19 @@ def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
             "pattern_params":     pattern_params,
             "albedo_map":         f"textures/texture_{frame_str}.png",
             "albedo_tiling":      [tile_u, tile_v],
-            # ── PBR ground-truth maps (pixel-aligned with renders/sketches) ──
-            "pbr_albedo":         f"pbr/albedo/albedo_{frame_str}.png",
-            "pbr_roughness":      f"pbr/roughness/roughness_{frame_str}.png",
-            "pbr_normal":         f"pbr/normal/normal_{frame_str}.png",
+            # ── Mesh / material+pattern / view / sample hierarchy ──
+            "frame_id":                  frame_id,
+            "mesh_dir_name":             sample_parts["mesh_dir_name"],
+            "material_pattern_dir_name": sample_parts["material_pattern_dir_name"],
+            "view_idx":                  view_idx,
+            "sample_dir_name":           sample_parts["sample_dir_name"],
+            "sample_output_dir":         os.path.relpath(sample_out_dir, BASE_DIR),
+            "pbr_albedo":                os.path.relpath(pbr_albedo_path,    BASE_DIR),
+            "pbr_roughness":             os.path.relpath(pbr_roughness_path, BASE_DIR),
+            "pbr_normal":                os.path.relpath(pbr_normal_path,    BASE_DIR),
+            "sketch_path":               os.path.relpath(
+                os.path.join(sample_out_dir, "sketch.png"), BASE_DIR
+            ),
         })
 
         light_types_str = ', '.join(lm['type'] for lm in lights_meta)
@@ -689,11 +710,9 @@ def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
     print(f"  • beauty PNGs   → {RENDERS_DIR}")
     print(f"  • depth .npy    → {DEPTH_DIR}")
     print(f"  • normal .npy   → {NORMALS_DIR}")
-    print(f"  • PBR albedo    → {PBR_ALBEDO_DIR}")
-    print(f"  • PBR roughness → {PBR_ROUGHNESS_DIR}")
-    print(f"  • PBR normal    → {PBR_NORMAL_DIR}")
+    print(f"  • PBR maps      → {OUTPUTS_DIR}/mesh_<stem>/<mat>_<pat>/view_0/sample_NNNN/")
     print(f"  • metadata      → {METADATA_PATH}")
-    print("\nNext: run  python generate_sketches.py  to run Neural Contours inference.")
+    print("\nNext: run  python generate_sketches.py  to write sketch.png next to PBR maps.")
 
 
 def run_front_mesh_previews(*, only_stem: str | None = None) -> None:
