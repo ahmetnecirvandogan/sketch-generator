@@ -21,6 +21,9 @@ from cloth_pipeline.paths import (
     MESHES_DIR,
     METADATA_PATH,
     NORMALS_DIR,
+    PBR_ALBEDO_DIR,
+    PBR_NORMAL_DIR,
+    PBR_ROUGHNESS_DIR,
     RENDERS_DIR,
     ensure_dataset_stage_dirs,
     ensure_front_preview_dir,
@@ -140,10 +143,13 @@ def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
 
     existing = sum(
         1 for j in range(num_samples)
-        if os.path.exists(os.path.join(RENDERS_DIR,  f"render_{j:04d}.png"))
-        and os.path.exists(os.path.join(DEPTH_DIR,   f"depth_{j:04d}.npy"))
-        and os.path.exists(os.path.join(NORMALS_DIR, f"normals_{j:04d}.npy"))
-        and os.path.exists(os.path.join(MASKS_DIR,   f"mask_{j:04d}.png"))
+        if os.path.exists(os.path.join(RENDERS_DIR,       f"render_{j:04d}.png"))
+        and os.path.exists(os.path.join(DEPTH_DIR,        f"depth_{j:04d}.npy"))
+        and os.path.exists(os.path.join(NORMALS_DIR,      f"normals_{j:04d}.npy"))
+        and os.path.exists(os.path.join(MASKS_DIR,        f"mask_{j:04d}.png"))
+        and os.path.exists(os.path.join(PBR_ALBEDO_DIR,   f"albedo_{j:04d}.png"))
+        and os.path.exists(os.path.join(PBR_ROUGHNESS_DIR, f"roughness_{j:04d}.png"))
+        and os.path.exists(os.path.join(PBR_NORMAL_DIR,   f"normal_{j:04d}.png"))
     )
     print(f"Checkpoint: {existing}/{num_samples} frames already done, resuming.\n")
     print(
@@ -158,17 +164,23 @@ def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
     )
 
     for i in range(num_samples):
-        frame_str    = f"{i:04d}"
-        render_path  = os.path.join(RENDERS_DIR,  f"render_{frame_str}.png")
-        depth_path   = os.path.join(DEPTH_DIR,    f"depth_{frame_str}.npy")
-        normals_path = os.path.join(NORMALS_DIR,  f"normals_{frame_str}.npy")
-        mask_path    = os.path.join(MASKS_DIR,    f"mask_{frame_str}.png")
+        frame_str          = f"{i:04d}"
+        render_path        = os.path.join(RENDERS_DIR,        f"render_{frame_str}.png")
+        depth_path         = os.path.join(DEPTH_DIR,          f"depth_{frame_str}.npy")
+        normals_path       = os.path.join(NORMALS_DIR,        f"normals_{frame_str}.npy")
+        mask_path          = os.path.join(MASKS_DIR,          f"mask_{frame_str}.png")
+        pbr_albedo_path    = os.path.join(PBR_ALBEDO_DIR,     f"albedo_{frame_str}.png")
+        pbr_roughness_path = os.path.join(PBR_ROUGHNESS_DIR,  f"roughness_{frame_str}.png")
+        pbr_normal_path    = os.path.join(PBR_NORMAL_DIR,     f"normal_{frame_str}.png")
 
         # --- CHECKPOINT: skip frames that are fully complete (and have metadata) ---
         if (os.path.exists(render_path)
                 and os.path.exists(depth_path)
                 and os.path.exists(normals_path)
-                and os.path.exists(mask_path)):
+                and os.path.exists(mask_path)
+                and os.path.exists(pbr_albedo_path)
+                and os.path.exists(pbr_roughness_path)
+                and os.path.exists(pbr_normal_path)):
             if frame_str in existing_metadata:
                 metadata_records.append(existing_metadata[frame_str])
                 print(f"  [{i+1:>4}/{num_samples}] Skipping {frame_str} (already exists)")
@@ -433,7 +445,9 @@ def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
 
             'integrator': {
                 'type': 'aov',
-                'aovs': 'depth:depth,normals:sh_normal',
+                # Append-only AOV order: depth(4), normals(5-7), albedo(8-10).
+                # Existing channel slicing below depends on these positions.
+                'aovs': 'depth:depth,normals:sh_normal,albedo:albedo',
                 'my_path': {
                     'type': 'path',
                     # Low depth avoids long specular chains (fireflies / “glitter”) while
@@ -577,6 +591,30 @@ def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
         np.save(normals_path, normals_np.astype(np.float32))
 
         # -----------------------------------------------------------------------
+        # PBR ground-truth maps (Hybrid A + C)
+        #   • albedo  → Mitsuba aov:albedo channels 8-10 (linear RGB), masked
+        #   • normal  → re-encode normals_np from [-1,1] → [0,255] RGB, masked
+        #   • roughness → uniform fill from BSDF scalar × mask (Design C, post-hoc)
+        # All three are masked so the background is black and the cloth pixels
+        # carry the GT values. They share the camera/resolution of `render_path`.
+        # -----------------------------------------------------------------------
+        if render_np.shape[2] >= 11:
+            albedo_np = np.clip(render_np[:, :, 8:11], 0.0, 1.0)
+        else:
+            print(f"  [WARNING] Albedo AOV not found for {frame_str}; saving zero albedo.")
+            albedo_np = np.zeros((*render_np.shape[:2], 3), dtype=np.float32)
+        albedo_masked = albedo_np * mesh_alpha[..., None]
+        albedo_uint8 = (albedo_masked * 255).astype(np.uint8)
+        cv2.imwrite(pbr_albedo_path, cv2.cvtColor(albedo_uint8, cv2.COLOR_RGB2BGR))
+
+        normal_encoded = ((normals_np + 1.0) * 0.5).clip(0.0, 1.0)
+        normal_uint8 = (normal_encoded * 255 * mesh_alpha[..., None]).astype(np.uint8)
+        cv2.imwrite(pbr_normal_path, cv2.cvtColor(normal_uint8, cv2.COLOR_RGB2BGR))
+
+        roughness_uint8 = np.clip(roughness * mesh_alpha * 255.0, 0, 255).astype(np.uint8)
+        cv2.imwrite(pbr_roughness_path, roughness_uint8)
+
+        # -----------------------------------------------------------------------
         # Record per-frame metadata
         #
         # The Neural Contours Geometry Branch computes Suggestive Contours and
@@ -625,6 +663,10 @@ def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
             "pattern_params":     pattern_params,
             "albedo_map":         f"textures/texture_{frame_str}.png",
             "albedo_tiling":      [tile_u, tile_v],
+            # ── PBR ground-truth maps (pixel-aligned with renders/sketches) ──
+            "pbr_albedo":         f"pbr/albedo/albedo_{frame_str}.png",
+            "pbr_roughness":      f"pbr/roughness/roughness_{frame_str}.png",
+            "pbr_normal":         f"pbr/normal/normal_{frame_str}.png",
         })
 
         light_types_str = ', '.join(lm['type'] for lm in lights_meta)
@@ -644,10 +686,13 @@ def run_generation(num_samples: int = 3) -> None:  # bump for full training runs
             f.write(json.dumps(record) + '\n')
 
     print(f"\n✓ Done!  {num_samples} render sets saved.")
-    print(f"  • beauty PNGs  → {RENDERS_DIR}")
-    print(f"  • depth .npy   → {DEPTH_DIR}")
-    print(f"  • normal .npy  → {NORMALS_DIR}")
-    print(f"  • metadata     → {METADATA_PATH}")
+    print(f"  • beauty PNGs   → {RENDERS_DIR}")
+    print(f"  • depth .npy    → {DEPTH_DIR}")
+    print(f"  • normal .npy   → {NORMALS_DIR}")
+    print(f"  • PBR albedo    → {PBR_ALBEDO_DIR}")
+    print(f"  • PBR roughness → {PBR_ROUGHNESS_DIR}")
+    print(f"  • PBR normal    → {PBR_NORMAL_DIR}")
+    print(f"  • metadata      → {METADATA_PATH}")
     print("\nNext: run  python generate_sketches.py  to run Neural Contours inference.")
 
 
