@@ -26,3 +26,6 @@ ENV/
 .DS_Store
 .idea/
 .vscode/
+
+# Generated meshes
+output_meshes/
