@@ -6,11 +6,29 @@
 
 set -e # Exit immediately if a command exits with a non-zero status.
 
+# ---------------------------------------------------------------------------
+# Resolve Blender binary: $BLENDER env var → PATH lookup → macOS default
+# ---------------------------------------------------------------------------
+if [ -n "${BLENDER:-}" ]; then
+    BLENDER_BIN="$BLENDER"
+elif command -v blender &>/dev/null; then
+    BLENDER_BIN="blender"
+elif [ -x "/Applications/Blender.app/Contents/MacOS/Blender" ]; then
+    BLENDER_BIN="/Applications/Blender.app/Contents/MacOS/Blender"
+else
+    echo "[ERROR] Blender not found."
+    echo "  • Set the BLENDER environment variable to your Blender binary path, e.g.:"
+    echo "      export BLENDER=/path/to/blender"
+    echo "  • Or add Blender to your PATH."
+    exit 1
+fi
+echo "Using Blender: $BLENDER_BIN"
+
 echo "================================================="
 echo "   STAGE 0: Mesh Generation (Blender)"
 echo "================================================="
 # Generate 10 variations by default. Change this number as needed.
-/Applications/Blender.app/Contents/MacOS/Blender -b -P mesh_generator.py -- --variations 10 --subdivisions 40
+"$BLENDER_BIN" -b -P mesh_generator.py -- --variations 10 --subdivisions 40
 echo "Done generating meshes."
 
 echo ""
