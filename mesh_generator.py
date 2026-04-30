@@ -67,13 +67,25 @@ def setup_simulation(input_dir, base_mesh_file, output_dir, subdivisions, target
     max_y = max([v.y for v in bbox_corners])
     min_y = min([v.y for v in bbox_corners])
     
-    # Randomize plane size multiplier for variety
-    size_mult = random.uniform(1.2, 1.8)
-    plane_size = max(max_x - min_x, max_y - min_y) * size_mult
-    plane_size = max(plane_size, 2.0) # At least size 2.0
+    # Natural shapes: Square, Long Scarf, or Wide Rectangle
+    shape_type = random.choice(["SQUARE", "SCARF", "RECTANGLE"])
+    base_size_x = max(max_x - min_x, 0.5)
+    base_size_y = max(max_y - min_y, 0.5)
     
-    bpy.ops.mesh.primitive_plane_add(size=plane_size, enter_editmode=False, align='WORLD', location=(0, 0, spawn_z))
+    if shape_type == "SQUARE":
+        plane_size_x = max(base_size_x, base_size_y) * random.uniform(1.2, 1.5)
+        plane_size_y = plane_size_x
+    elif shape_type == "SCARF":
+        plane_size_x = base_size_x * random.uniform(1.0, 1.2)
+        plane_size_y = base_size_y * random.uniform(2.0, 3.0)
+    else:
+        plane_size_x = base_size_x * random.uniform(1.5, 2.0)
+        plane_size_y = base_size_y * random.uniform(1.0, 1.2)
+        
+    bpy.ops.mesh.primitive_plane_add(size=1.0, enter_editmode=False, align='WORLD', location=(0, 0, spawn_z))
     cloth_obj = bpy.context.active_object
+    cloth_obj.scale = (plane_size_x, plane_size_y, 1.0)
+    bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
     cloth_obj.name = "DrapedCloth"
     
     # Subdivide the plane
@@ -81,25 +93,62 @@ def setup_simulation(input_dir, base_mesh_file, output_dir, subdivisions, target
     bpy.ops.mesh.subdivide(number_cuts=subdivisions)
     bpy.ops.object.editmode_toggle()
     
-    # Randomize location/rotation significantly for variation
-    cloth_obj.location.x += random.uniform(-0.2 * plane_size, 0.2 * plane_size)
-    cloth_obj.location.y += random.uniform(-0.2 * plane_size, 0.2 * plane_size)
+    # Pre-shape the cloth to mimic being worn around a neck (50% chance for scarves)
+    if shape_type == "SCARF" and random.random() < 0.5:
+        bend_mod = cloth_obj.modifiers.new(name="ScarfBend", type='SIMPLE_DEFORM')
+        bend_mod.deform_method = 'BEND'
+        bend_mod.angle = 3.14159 * random.uniform(0.7, 1.0) # Bend 120-180 degrees
+        bend_mod.deform_axis = 'X' # Bends the long Y-ends downward
+        
+        bpy.context.view_layer.objects.active = cloth_obj
+        bpy.ops.object.modifier_apply(modifier=bend_mod.name)
+    
+    # Randomize location slightly for natural variation
+    cloth_obj.location.x += random.uniform(-0.1 * plane_size_x, 0.1 * plane_size_x)
+    cloth_obj.location.y += random.uniform(-0.1 * plane_size_y, 0.1 * plane_size_y)
+    cloth_obj.rotation_euler.x += random.uniform(-0.2, 0.2) # Slight natural tilt
+    cloth_obj.rotation_euler.y += random.uniform(-0.2, 0.2)
     cloth_obj.rotation_euler.z += random.uniform(0, 3.14159 * 2) # Full 360 rotation possible
     
     # Apply Cloth Modifier
     cloth_mod = cloth_obj.modifiers.new(name="Cloth", type='CLOTH')
     
-    # Randomize Cloth Physics Properties for different fold styles
+    # Realistic material presets with varying curve/wrinkle ability
+    material = random.choice(["THIN_SCARF", "SILK", "COTTON", "DENIM"])
     cloth_settings = cloth_mod.settings
-    cloth_settings.mass = random.uniform(0.1, 0.5)
-    cloth_settings.tension_stiffness = random.uniform(5, 25)
-    cloth_settings.compression_stiffness = random.uniform(5, 25)
-    cloth_settings.shear_stiffness = random.uniform(1, 10)
-    cloth_settings.bending_stiffness = random.uniform(0.1, 2.0)
+    
+    if material == "THIN_SCARF":
+        cloth_settings.mass = 0.2
+        cloth_settings.tension_stiffness = 5.0
+        cloth_settings.compression_stiffness = 5.0
+        cloth_settings.shear_stiffness = 5.0
+        cloth_settings.bending_stiffness = 0.1 # Very low for lots of curves/wrinkles
+    elif material == "SILK":
+        cloth_settings.mass = 0.4
+        cloth_settings.tension_stiffness = 15.0
+        cloth_settings.compression_stiffness = 15.0
+        cloth_settings.shear_stiffness = 15.0
+        cloth_settings.bending_stiffness = 1.0
+    elif material == "COTTON":
+        cloth_settings.mass = 0.8
+        cloth_settings.tension_stiffness = 30.0
+        cloth_settings.compression_stiffness = 30.0
+        cloth_settings.shear_stiffness = 30.0
+        cloth_settings.bending_stiffness = 3.0
+    else: # DENIM
+        cloth_settings.mass = 1.5
+        cloth_settings.tension_stiffness = 60.0
+        cloth_settings.compression_stiffness = 60.0
+        cloth_settings.shear_stiffness = 60.0
+        cloth_settings.bending_stiffness = 5.0
+    
+    # Add minor natural variation to the mass
+    cloth_settings.mass *= random.uniform(0.8, 1.2)
     
     collision_settings = cloth_mod.collision_settings
     collision_settings.use_collision = True
     collision_settings.use_self_collision = True
+    collision_settings.friction = random.uniform(1.0, 5.0) # Natural friction variance
     
     # Smooth shading
     bpy.ops.object.shade_smooth()
@@ -109,6 +158,9 @@ def setup_simulation(input_dir, base_mesh_file, output_dir, subdivisions, target
     subsurf_mod.levels = 1
     subsurf_mod.render_levels = 1
     
+    # Reset gravity to normal Earth gravity
+    bpy.context.scene.gravity[2] = -9.81
+
     # 4. Run Simulation
     print(f"Baking simulation up to frame {target_frame}...")
     bpy.context.scene.frame_start = 1
@@ -132,6 +184,11 @@ def setup_simulation(input_dir, base_mesh_file, output_dir, subdivisions, target
     # 6. Delete Base Mesh
     bpy.data.objects.remove(base_obj, do_unlink=True)
     
+    # Select only the cloth
+    bpy.context.view_layer.objects.active = cloth_obj
+    bpy.ops.object.select_all(action='DESELECT')
+    cloth_obj.select_set(True)
+    
     # 7. Export .obj
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -139,10 +196,6 @@ def setup_simulation(input_dir, base_mesh_file, output_dir, subdivisions, target
     timestamp = int(time.time() * 1000)
     export_filename = f"draped_{timestamp}_{base_mesh_file}"
     export_path = os.path.abspath(os.path.join(output_dir, export_filename))
-    
-    # Select only the cloth
-    bpy.ops.object.select_all(action='DESELECT')
-    cloth_obj.select_set(True)
     
     try:
         bpy.ops.wm.obj_export(
@@ -167,7 +220,6 @@ def main():
     global mathutils
     import mathutils
     
-    # Select ONE random base mesh for all variations
     input_dir = args.input_dir
     if not os.path.exists(input_dir):
         print(f"Error: Input directory '{input_dir}' not found.")
@@ -177,13 +229,13 @@ def main():
     if not obj_files:
         print(f"Error: No .obj files found in '{input_dir}'.")
         return
-        
-    base_mesh_file = random.choice(obj_files)
-    print(f"Selected base mesh for this run: {base_mesh_file}")
 
     print(f"Starting generation of {args.variations} variations...")
     for i in range(args.variations):
+        # Select a random base mesh for EACH variation to maximize variety
+        base_mesh_file = random.choice(obj_files)
         print(f"\n--- Generating variation {i+1}/{args.variations} ---")
+        print(f"Selected base mesh: {base_mesh_file}")
         clear_scene()
         success = setup_simulation(
             args.input_dir, 
