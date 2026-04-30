@@ -6,6 +6,7 @@ import glob
 import json
 import os
 import random
+import re
 import sys
 
 import cv2
@@ -26,6 +27,26 @@ from cloth_pipeline.paths import (
 )
 
 mi.set_variant("scalar_rgb")
+
+
+def _clean_mesh_name(stem: str) -> str:
+    """Extract a human-readable object name from a mesh filename stem."""
+    # 1. Remove hash-like prefixes from draped meshes (e.g., 'draped_1777576688175_')
+    s = re.sub(r"^draped_\d+_", "", stem, flags=re.IGNORECASE)
+    # 2. Remove common site prefixes (e.g., 'uploads-files-12345-')
+    s = re.sub(r"^uploads-files-\d+-", "", s, flags=re.IGNORECASE)
+    # 3. Remove leading numeric IDs (e.g., '10152_')
+    s = re.sub(r"^\d+_", "", s)
+    # 4. Remove versioning/LoD suffixes (e.g., '_v01_L3')
+    s = re.sub(r"(_v\d+.*|_L\d+)$", "", s, flags=re.IGNORECASE)
+    # 5. Replace underscores/hyphens with spaces
+    s = s.replace("_", " ").replace("-", " ")
+    # Clean up and Title Case
+    s = s.strip().title()
+    # Fallback for empty or overly technical names
+    if not s or s.lower() in ("gabardine", "mesh", "object"):
+        s = "Cloth"
+    return s
 
 
 def _env_int(name: str, default: int) -> int:
@@ -488,10 +509,23 @@ def run_generation(
         pattern_params  = mp['pattern_params']
         tile_u          = mp['tile_u']
         tile_v          = mp['tile_v']
-        keyword         = f"{material_desc} pattern"
+
+        # --- DYNAMIC PROMPT ---
+        obj_name = _clean_mesh_name(mesh_name)
+        keyword  = f"{material_desc} {obj_name}"
         prompt = (
-            f"a photorealistic 3D render of a {material_desc} cloth with "
+            f"a photorealistic 3D render of a {material_desc} {obj_name} with "
             f"{pattern_name} pattern, physical rendering, detailed fabric folds"
+        )
+
+        # --- TEXTURE-FOCUSED PROMPT (for prompt.txt only) ---
+        rough_desc = "matte surface" if roughness > 0.5 else "smooth finish" if roughness > 0.2 else "glossy finish"
+        sheen_desc = "with a soft velvety sheen" if sheen > 0.6 else "with subtle highlights"
+        texture_prompt = (
+            f"{material_desc} fabric texture, {pattern_name} pattern, "
+            f"a high-detail 3D render of {material_desc} fabric surface, "
+            f"featuring a {pattern_name} pattern, {rough_desc}, {sheen_desc}, "
+            f"micro-texture surface detail, realistic cloth folds"
         )
 
         view_idx = 0
@@ -722,13 +756,13 @@ def run_generation(
         #   • mesh_transform    – 4×4 matrix that was applied to the .obj mesh,
         #                         so the geometry branch can reproduce the pose
         # -----------------------------------------------------------------------
-        metadata_records.append({
+        rec = {
             "frame":              frame_str,
             "file_name":          os.path.relpath(render_path, BASE_DIR),
             "depth_image":        os.path.relpath(depth_path, BASE_DIR),
             "normals_image":      os.path.relpath(normals_path, BASE_DIR),
             "mask_image":         os.path.relpath(mask_path, BASE_DIR),
-            "text":               f"Cloth Scarf, {material_desc} material, {prompt}",
+            "text":               f"{obj_name}, {material_desc} material, {prompt}",
             "keyword":             keyword,
             "mesh_file":          os.path.relpath(current_mesh_path, BASE_DIR),
             # ── Camera parameters (Neural Contours Geometry Branch) ──
@@ -774,7 +808,14 @@ def run_generation(
             "sketch_path":               os.path.relpath(
                 os.path.join(sample_out_dir, "sketch.png"), BASE_DIR
             ),
-        })
+        }
+        metadata_records.append(rec)
+
+        # ---- Save per-sample prompt and metadata ----
+        with open(os.path.join(sample_out_dir, "prompt.txt"), "w") as f:
+            f.write(texture_prompt)
+        with open(os.path.join(sample_out_dir, "metadata.json"), "w") as f:
+            json.dump(rec, f, indent=4)
 
         light_types_str = ', '.join(lm['type'] for lm in lights_meta)
         print(
@@ -793,11 +834,8 @@ def run_generation(
             f.write(json.dumps(record) + '\n')
 
     print(f"\n✓ Done!  {num_samples} render sets saved.")
-    print(f"  • beauty PNGs   → {RENDERS_DIR}")
-    print(f"  • depth .npy    → {DEPTH_DIR}")
-    print(f"  • normal .npy   → {NORMALS_DIR}")
-    print(f"  • PBR maps      → {OUTPUTS_DIR}/mesh_<stem>/<mat>_<pat>/view_0/sample_NNNN/")
-    print(f"  • metadata      → {METADATA_PATH}")
+    print(f"  • PBR maps + info → {OUTPUTS_DIR}/mesh_<stem>/<mat>_<pat>/view_0/sample_NNNN/")
+    print(f"  • metadata index  → {METADATA_PATH}")
     print("\nNext: run  python generate_sketches.py  to write sketch.png next to PBR maps.")
 
 

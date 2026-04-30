@@ -3,6 +3,7 @@ import os
 import sys
 import argparse
 import random
+import re
 import time
 
 def get_args():
@@ -23,6 +24,18 @@ def get_args():
 
 def clear_scene():
     bpy.ops.wm.read_factory_settings(use_empty=True)
+
+def _clean_base_name(filename: str) -> str:
+    """Simplify base mesh filename by removing technical prefixes and IDs."""
+    stem = os.path.splitext(filename)[0]
+    # Remove common prefixes like 'uploads-files-12345-'
+    s = re.sub(r"^uploads-files-\d+-", "", stem, flags=re.IGNORECASE)
+    # Remove leading numeric IDs (e.g., '10152_')
+    s = re.sub(r"^\d+_", "", s)
+    # Replace non-alphanumeric with underscores and lowercase
+    s = re.sub(r"[^a-z0-9]+", "_", s.lower())
+    return s.strip("_")
+
 
 def setup_simulation(input_dir, base_mesh_file, output_dir, subdivisions, target_frame, seed):
     random.seed(seed)
@@ -193,8 +206,10 @@ def setup_simulation(input_dir, base_mesh_file, output_dir, subdivisions, target
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
         
-    timestamp = int(time.time() * 1000)
-    export_filename = f"draped_{timestamp}_{base_mesh_file}"
+    # Simplify output name: draped_{base}_{short_hash}.obj
+    base_name = _clean_base_name(base_mesh_file)
+    short_id = hex(int(time.time() * 1000))[7:] # Use last few digits of timestamp for uniqueness
+    export_filename = f"draped_{base_name}_{short_id}.obj"
     export_path = os.path.abspath(os.path.join(output_dir, export_filename))
     
     try:
