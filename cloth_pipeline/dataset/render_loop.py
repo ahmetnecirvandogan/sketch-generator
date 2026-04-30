@@ -131,7 +131,12 @@ def run_generation(
     """
     ensure_dataset_stage_dirs()
 
-    mesh_files = sorted(glob.glob(os.path.join(MESHES_DIR, "*.obj")))
+    OUTPUT_MESHES_DIR = os.path.join(BASE_DIR, "output_meshes")
+    # Render output_meshes first so new generations can be checked immediately
+    mesh_files = (
+        sorted(glob.glob(os.path.join(OUTPUT_MESHES_DIR, "*.obj"))) +
+        sorted(glob.glob(os.path.join(MESHES_DIR, "*.obj")))
+    )
     print("--- PATH DIAGNOSTICS ---")
     print(f"Meshes dir  : {MESHES_DIR}")
     print(f"  Found     : {len(mesh_files)} .obj file(s)")
@@ -816,7 +821,12 @@ def run_front_mesh_previews(*, only_stem: str | None = None) -> None:
     If ``only_stem`` is set (OBJ basename without ``.obj``), only that mesh is rendered.
     """
     ensure_front_preview_dir()
-    mesh_files = sorted(glob.glob(os.path.join(MESHES_DIR, "*.obj")))
+    OUTPUT_MESHES_DIR = os.path.join(BASE_DIR, "output_meshes")
+    # Render output_meshes first so new generations can be checked immediately
+    mesh_files = (
+        sorted(glob.glob(os.path.join(OUTPUT_MESHES_DIR, "*.obj"))) +
+        sorted(glob.glob(os.path.join(MESHES_DIR, "*.obj")))
+    )
     if not mesh_files:
         print(f"[ERROR] No .obj files found in {MESHES_DIR}.")
         raise SystemExit(1)
