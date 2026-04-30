@@ -2,7 +2,7 @@
 generate_sketches.py
 --------------------
 Stage 2: Mitsuba renders → aligned sketch images written to
-``outputs/<mesh>/view_<idx>/sketch.png`` next to the PBR maps from Stage 1.
+``dataset/<mesh>/view_<idx>/sketch.png`` next to the PBR maps from Stage 1.
 
 The CV pipeline is split under ``cloth_pipeline.sketch`` (edges, segmentation,
 shadows, features, drawing, batch runner). Run from project root:

@@ -1,5 +1,8 @@
-# Generated dataset artifacts
-dataset/
+# Generated dataset artifacts (root-level only)
+/dataset/
+
+# Generated PBR output maps
+outputs/
 
 # Python cache / build artifacts
 __pycache__/
@@ -26,3 +29,10 @@ ENV/
 .DS_Store
 .idea/
 .vscode/
+
+# Generated meshes
+output_meshes/
+
+# Scratch test files
+test_bake.py
+test_obj.py

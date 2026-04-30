@@ -3,7 +3,7 @@ generate_dataset.py
 -------------------
 Stage 1 of the Neural-Contours-Cloth ControlNet dataset pipeline.
 
-Implementation lives in ``cloth_pipeline.dataset`` (paths, procedural albedo maps,
+Implementation lives in ``cloth_pipeline.rendering`` (paths, procedural albedo maps,
 Mitsuba render loop). Run this file from the project root as before:
 
   python generate_dataset.py
@@ -15,7 +15,7 @@ Outputs land under ``dataset/``; Stage 2 is ``generate_sketches.py``.
 
 import argparse
 
-from cloth_pipeline.dataset import run_front_mesh_previews, run_generation
+from cloth_pipeline.rendering import run_front_mesh_previews, run_generation
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Stage 1: Mitsuba cloth dataset renders.")

@@ -11,7 +11,7 @@ import random
 import numpy as np
 from PIL import Image, ImageDraw
 
-from cloth_pipeline.paths import ALBEDO_MAPS_DIR
+
 
 TEXTURE_SIZE = 512
 
@@ -199,10 +199,8 @@ PATTERN_GENERATORS = [
 ]
 
 
-def generate_random_albedo_map(frame_str: str) -> tuple:
-    """Pick a procedural pattern, save ``texture_<frame>.png``, return path + metadata."""
+def generate_random_albedo_map() -> tuple:
+    """Pick a procedural pattern, return img, pattern_name, params."""
     gen_fn = random.choice(PATTERN_GENERATORS)
     img, pattern_name, params = gen_fn()
-    out_path = os.path.join(ALBEDO_MAPS_DIR, f"texture_{frame_str}.png")
-    img.save(out_path)
-    return out_path, pattern_name, params
+    return img, pattern_name, params

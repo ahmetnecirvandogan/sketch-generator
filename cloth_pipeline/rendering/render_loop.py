@@ -6,24 +6,20 @@ import glob
 import json
 import os
 import random
+import re
 import sys
 
 import cv2
 import mitsuba as mi
 import numpy as np
 
-from cloth_pipeline.dataset.textures import generate_random_albedo_map
+from cloth_pipeline.rendering.textures import generate_random_albedo_map
 from cloth_pipeline.paths import (
     BASE_DIR,
-    DATASET_DIR,
-    DEPTH_DIR,
     FRONT_PREVIEW_DIR,
-    MASKS_DIR,
     MESHES_DIR,
     METADATA_PATH,
-    NORMALS_DIR,
-    OUTPUTS_DIR,
-    RENDERS_DIR,
+    DATASET_DIR,
     ensure_dataset_stage_dirs,
     ensure_front_preview_dir,
     output_sample_dir,
@@ -31,6 +27,26 @@ from cloth_pipeline.paths import (
 )
 
 mi.set_variant("scalar_rgb")
+
+
+def _clean_mesh_name(stem: str) -> str:
+    """Extract a human-readable object name from a mesh filename stem."""
+    # 1. Remove hash-like prefixes from draped meshes (e.g., 'draped_1777576688175_')
+    s = re.sub(r"^draped_\d+_", "", stem, flags=re.IGNORECASE)
+    # 2. Remove common site prefixes (e.g., 'uploads-files-12345-')
+    s = re.sub(r"^uploads-files-\d+-", "", s, flags=re.IGNORECASE)
+    # 3. Remove leading numeric IDs (e.g., '10152_')
+    s = re.sub(r"^\d+_", "", s)
+    # 4. Remove versioning/LoD suffixes (e.g., '_v01_L3')
+    s = re.sub(r"(_v\d+.*|_L\d+)$", "", s, flags=re.IGNORECASE)
+    # 5. Replace underscores/hyphens with spaces
+    s = s.replace("_", " ").replace("-", " ")
+    # Clean up and Title Case
+    s = s.strip().title()
+    # Fallback for empty or overly technical names
+    if not s or s.lower() in ("gabardine", "mesh", "object"):
+        s = "Cloth"
+    return s
 
 
 def _env_int(name: str, default: int) -> int:
@@ -131,18 +147,24 @@ def run_generation(
     """
     ensure_dataset_stage_dirs()
 
-    mesh_files = sorted(glob.glob(os.path.join(MESHES_DIR, "*.obj")))
+    OUTPUT_MESHES_DIR = os.path.join(BASE_DIR, "output_meshes")
+    # Render output_meshes first so new generations can be checked immediately
+    output_mesh_files = sorted(glob.glob(os.path.join(OUTPUT_MESHES_DIR, "*.obj")))
+    cloth_mesh_files = sorted(glob.glob(os.path.join(MESHES_DIR, "*.obj")))
+    mesh_files = output_mesh_files + cloth_mesh_files
+
     print("--- PATH DIAGNOSTICS ---")
-    print(f"Meshes dir  : {MESHES_DIR}")
-    print(f"  Found     : {len(mesh_files)} .obj file(s)")
-    print(f"Renders dir : {RENDERS_DIR}")
-    print(f"Depth dir   : {DEPTH_DIR}")
-    print(f"Normals dir : {NORMALS_DIR}")
-    print("------------------------\n")
+    print(f"Base meshes dir : {MESHES_DIR}")
+    print(f"  Found         : {len(cloth_mesh_files)} .obj file(s)")
+    print(f"Gen meshes dir  : {OUTPUT_MESHES_DIR}")
+    print(f"  Found         : {len(output_mesh_files)} .obj file(s)")
+    print(f"Total found     : {len(mesh_files)} .obj file(s)")
+    print(f"Dataset dir     : {DATASET_DIR}")
+    print("------------------------\\n")
 
     if not mesh_files:
-        print(f"[ERROR] No .obj files found in {MESHES_DIR}.")
-        print("Please add your cloth meshes to that folder and run again.")
+        print(f"[ERROR] No .obj files found in either {MESHES_DIR} or {OUTPUT_MESHES_DIR}.")
+        print("Please add your cloth meshes or generate new ones and run again.")
         raise SystemExit(1)
 
     samples_per_mesh = materials_per_mesh * lightings_per_material
@@ -177,7 +199,7 @@ def run_generation(
         if cache_key in material_pattern_cache:
             continue
         tex_rel = rec.get("albedo_map")
-        tex_path = os.path.join(DATASET_DIR, tex_rel) if tex_rel else None
+        tex_path = os.path.join(BASE_DIR, tex_rel) if tex_rel else None
         if not tex_path or not os.path.exists(tex_path):
             continue
         props = rec.get("material_props") or {}
@@ -200,14 +222,8 @@ def run_generation(
 
     metadata_records = []
 
-    existing = sum(
-        1 for j in range(num_samples)
-        if os.path.exists(os.path.join(RENDERS_DIR,  f"render_{j:04d}.png"))
-        and os.path.exists(os.path.join(DEPTH_DIR,   f"depth_{j:04d}.npy"))
-        and os.path.exists(os.path.join(NORMALS_DIR, f"normals_{j:04d}.npy"))
-        and os.path.exists(os.path.join(MASKS_DIR,   f"mask_{j:04d}.png"))
-    )
-    print(f"Checkpoint: {existing}/{num_samples} frames already done, resuming.\n")
+    existing = len(existing_metadata)
+    print(f"Checkpoint: {existing}/{num_samples} frames already done, resuming.\\n")
     print(
         f"Film {FILM_WIDTH}×{FILM_HEIGHT}, {PATH_SAMPLE_COUNT} samples/pixel. "
         f"Override: NECH_FILM_W, NECH_FILM_H, NECH_SAMPLES.",
@@ -221,28 +237,17 @@ def run_generation(
 
     for i in range(num_samples):
         frame_str    = f"{i:04d}"
-        render_path  = os.path.join(RENDERS_DIR,  f"render_{frame_str}.png")
-        depth_path   = os.path.join(DEPTH_DIR,    f"depth_{frame_str}.npy")
-        normals_path = os.path.join(NORMALS_DIR,  f"normals_{frame_str}.npy")
-        mask_path    = os.path.join(MASKS_DIR,    f"mask_{frame_str}.png")
-
-        # --- CHECKPOINT: skip when intermediates + recorded PBR sample dir
-        # all exist. The mesh+material+pattern combination chosen for a frame
-        # is random, so we read the recorded paths straight from metadata. ---
-        if (frame_str in existing_metadata
-                and os.path.exists(render_path)
-                and os.path.exists(depth_path)
-                and os.path.exists(normals_path)
-                and os.path.exists(mask_path)):
+        
+        # --- CHECKPOINT: skip when intermediates + recorded PBR sample dir all exist. ---
+        if frame_str in existing_metadata:
             rec = existing_metadata[frame_str]
-            rec_paths = [rec.get("pbr_albedo"), rec.get("pbr_normal"), rec.get("pbr_roughness")]
-            if all(rec_paths) and all(
-                os.path.exists(os.path.join(BASE_DIR, p)) for p in rec_paths
-            ):
+            sample_out_dir = os.path.join(BASE_DIR, rec["sample_output_dir"])
+            render_path = os.path.join(sample_out_dir, "render.png")
+            if os.path.exists(render_path) and os.path.exists(os.path.join(sample_out_dir, "albedo.png")):
                 metadata_records.append(rec)
                 print(f"  [{i+1:>4}/{num_samples}] Skipping {frame_str} (already exists)")
                 continue
-            print(f"  [{i+1:>4}/{num_samples}] Re-rendering {frame_str} (PBR outputs missing)")
+            print(f"  [{i+1:>4}/{num_samples}] Re-rendering {frame_str} (outputs missing)")
 
         print(
             f"  [{i+1:>4}/{num_samples}] Frame {frame_str}: setup (mesh, lights, materials)…",
@@ -452,10 +457,8 @@ def run_generation(
                 lo, hi = _p[key]
                 return random.uniform(lo, hi)
 
-            tex_path, pattern_name, pattern_params = generate_random_albedo_map(frame_str)
+            img, pattern_name, pattern_params = generate_random_albedo_map()
 
-            # Analyse mesh UV range to choose a tiling factor that makes the pattern
-            # repeat at a visually sensible scale regardless of how the OBJ was UV-unwrapped.
             uv_u_range, uv_v_range = 1.0, 1.0
             try:
                 with open(current_mesh_path) as _mf:
@@ -482,7 +485,7 @@ def run_generation(
                 'anisotropic':     _sample('anisotropic'),
                 'spec_trans':      _sample('spec_trans'),
                 'clearcoat':       _sample('clearcoat'),
-                'tex_path':        tex_path,
+                'img':             img,
                 'pattern_name':    pattern_name,
                 'pattern_params':  pattern_params,
                 'tile_u':          desired_repeats / max(uv_u_range, 0.01),
@@ -498,16 +501,57 @@ def run_generation(
         anisotropic     = mp['anisotropic']
         spec_trans      = mp['spec_trans']
         clearcoat       = mp['clearcoat']
-        tex_path        = mp['tex_path']
+        if 'tex_path' in mp:
+            tex_path = mp['tex_path']
+        else:
+            tex_path = None
         pattern_name    = mp['pattern_name']
         pattern_params  = mp['pattern_params']
         tile_u          = mp['tile_u']
         tile_v          = mp['tile_v']
-        keyword         = f"{material_desc} pattern"
+
+        # --- DYNAMIC PROMPT ---
+        obj_name = _clean_mesh_name(mesh_name)
+        keyword  = f"{material_desc} {obj_name}"
         prompt = (
-            f"a photorealistic 3D render of a {material_desc} cloth with "
+            f"a photorealistic 3D render of a {material_desc} {obj_name} with "
             f"{pattern_name} pattern, physical rendering, detailed fabric folds"
         )
+
+        # --- TEXTURE-FOCUSED PROMPT (for prompt.txt only) ---
+        rough_desc = "matte surface" if roughness > 0.5 else "smooth finish" if roughness > 0.2 else "glossy finish"
+        sheen_desc = "with a soft velvety sheen" if sheen > 0.6 else "with subtle highlights"
+        texture_prompt = (
+            f"{material_desc} fabric texture, {pattern_name} pattern, "
+            f"a high-detail 3D render of {material_desc} fabric surface, "
+            f"featuring a {pattern_name} pattern, {rough_desc}, {sheen_desc}, "
+            f"micro-texture surface detail, realistic cloth folds"
+        )
+
+        view_idx = 0
+        frame_id = i
+        sample_parts = sample_dir_components(
+            current_mesh_path, material_desc, pattern_name, view_idx, frame_id
+        )
+        sample_out_dir = output_sample_dir(
+            current_mesh_path, material_desc, pattern_name, view_idx, frame_id
+        )
+        os.makedirs(sample_out_dir, exist_ok=True)
+        
+        # Save texture in the sample folder
+        tex_path = os.path.join(sample_out_dir, "texture.png")
+        if 'img' in mp:
+            mp['img'].save(tex_path)
+        else:
+            # From metadata, copy if it doesn't exist
+            if 'tex_path' in mp and mp['tex_path'] and not os.path.exists(tex_path) and mp['tex_path'] != tex_path:
+                import shutil
+                shutil.copy2(mp['tex_path'], tex_path)
+        
+        render_path = os.path.join(sample_out_dir, "render.png")
+        depth_path = os.path.join(sample_out_dir, "depth.npy")
+        normals_path = os.path.join(sample_out_dir, "normals.npy")
+        mask_path = os.path.join(sample_out_dir, "mask.png")
 
         base_color_spec = {
             'type': 'bitmap',
@@ -678,23 +722,8 @@ def run_generation(
         np.save(normals_path, normals_np.astype(np.float32))
 
         # -----------------------------------------------------------------------
-        # PBR ground-truth maps → outputs/mesh_<stem>/<material>_<pattern>/view_<idx>/sample_<frame>/
-        #   • albedo.png    → Mitsuba aov:albedo channels 8-10 (linear RGB), masked
-        #   • normal.png    → re-encode normals_np from [-1,1] → [0,255] RGB, masked
-        #   • roughness.png → uniform fill from BSDF scalar × mask (Design C, post-hoc)
-        # The per-sample frame folder makes every frame collision-free, so two
-        # frames picking the same (mesh, material, pattern, view) live side by
-        # side as different lighting variations.
+        # PBR ground-truth maps (now saved directly in sample_out_dir)
         # -----------------------------------------------------------------------
-        view_idx = 0  # multi-view rendering not implemented yet
-        frame_id = i
-        sample_parts = sample_dir_components(
-            current_mesh_path, material_desc, pattern_name, view_idx, frame_id
-        )
-        sample_out_dir = output_sample_dir(
-            current_mesh_path, material_desc, pattern_name, view_idx, frame_id
-        )
-        os.makedirs(sample_out_dir, exist_ok=True)
         pbr_albedo_path    = os.path.join(sample_out_dir, "albedo.png")
         pbr_normal_path    = os.path.join(sample_out_dir, "normal.png")
         pbr_roughness_path = os.path.join(sample_out_dir, "roughness.png")
@@ -727,16 +756,15 @@ def run_generation(
         #   • mesh_transform    – 4×4 matrix that was applied to the .obj mesh,
         #                         so the geometry branch can reproduce the pose
         # -----------------------------------------------------------------------
-        metadata_records.append({
+        rec = {
             "frame":              frame_str,
-            "file_name":          f"renders/render_{frame_str}.png",
-            "depth_image":        f"depth/depth_{frame_str}.npy",
-            "normals_image":      f"normals/normals_{frame_str}.npy",
-            "mask_image":         f"masks/mask_{frame_str}.png",
-            "conditioning_image": f"conditioning/conditioning_{frame_str}.png",
-            "text":               f"Cloth Scarf, {material_desc} material, {prompt}",
+            "file_name":          os.path.relpath(render_path, BASE_DIR),
+            "depth_image":        os.path.relpath(depth_path, BASE_DIR),
+            "normals_image":      os.path.relpath(normals_path, BASE_DIR),
+            "mask_image":         os.path.relpath(mask_path, BASE_DIR),
+            "text":               f"{obj_name}, {material_desc} material, {prompt}",
             "keyword":             keyword,
-            "mesh_file":          os.path.relpath(current_mesh_path, DATASET_DIR),
+            "mesh_file":          os.path.relpath(current_mesh_path, BASE_DIR),
             # ── Camera parameters (Neural Contours Geometry Branch) ──
             "cam_origin":         cam_origin,
             "cam_target":         cam_target,
@@ -762,7 +790,7 @@ def run_generation(
             # ── Procedural albedo map (surface pattern, not BRDF material) ──
             "pattern_name":       pattern_name,
             "pattern_params":     pattern_params,
-            "albedo_map":         f"textures/texture_{frame_str}.png",
+            "albedo_map":         os.path.relpath(tex_path, BASE_DIR),
             "albedo_tiling":      [tile_u, tile_v],
             # ── Mesh / material+pattern / view / sample hierarchy ──
             "frame_id":                  frame_id,
@@ -780,7 +808,14 @@ def run_generation(
             "sketch_path":               os.path.relpath(
                 os.path.join(sample_out_dir, "sketch.png"), BASE_DIR
             ),
-        })
+        }
+        metadata_records.append(rec)
+
+        # ---- Save per-sample prompt and metadata ----
+        with open(os.path.join(sample_out_dir, "prompt.txt"), "w") as f:
+            f.write(texture_prompt)
+        with open(os.path.join(sample_out_dir, "metadata.json"), "w") as f:
+            json.dump(rec, f, indent=4)
 
         light_types_str = ', '.join(lm['type'] for lm in lights_meta)
         print(
@@ -799,11 +834,8 @@ def run_generation(
             f.write(json.dumps(record) + '\n')
 
     print(f"\n✓ Done!  {num_samples} render sets saved.")
-    print(f"  • beauty PNGs   → {RENDERS_DIR}")
-    print(f"  • depth .npy    → {DEPTH_DIR}")
-    print(f"  • normal .npy   → {NORMALS_DIR}")
-    print(f"  • PBR maps      → {OUTPUTS_DIR}/mesh_<stem>/<mat>_<pat>/view_0/sample_NNNN/")
-    print(f"  • metadata      → {METADATA_PATH}")
+    print(f"  • PBR maps + info → {DATASET_DIR}/mesh_<stem>/<mat>_<pat>/view_0/sample_NNNN/")
+    print(f"  • metadata index  → {METADATA_PATH}")
     print("\nNext: run  python generate_sketches.py  to write sketch.png next to PBR maps.")
 
 
@@ -816,9 +848,14 @@ def run_front_mesh_previews(*, only_stem: str | None = None) -> None:
     If ``only_stem`` is set (OBJ basename without ``.obj``), only that mesh is rendered.
     """
     ensure_front_preview_dir()
-    mesh_files = sorted(glob.glob(os.path.join(MESHES_DIR, "*.obj")))
+    OUTPUT_MESHES_DIR = os.path.join(BASE_DIR, "output_meshes")
+    # Render output_meshes first so new generations can be checked immediately
+    mesh_files = (
+        sorted(glob.glob(os.path.join(OUTPUT_MESHES_DIR, "*.obj"))) +
+        sorted(glob.glob(os.path.join(MESHES_DIR, "*.obj")))
+    )
     if not mesh_files:
-        print(f"[ERROR] No .obj files found in {MESHES_DIR}.")
+        print(f"[ERROR] No .obj files found in either {MESHES_DIR} or {OUTPUT_MESHES_DIR}.")
         raise SystemExit(1)
     if only_stem:
         mesh_files = [
@@ -827,7 +864,7 @@ def run_front_mesh_previews(*, only_stem: str | None = None) -> None:
             if os.path.basename(p).replace(".obj", "") == only_stem
         ]
         if not mesh_files:
-            print(f"[ERROR] No mesh matching stem {only_stem!r} in {MESHES_DIR}.")
+            print(f"[ERROR] No mesh matching stem {only_stem!r} in {MESHES_DIR} or {OUTPUT_MESHES_DIR}.")
             raise SystemExit(1)
 
     prev_w = max(64, _env_int("NECH_PREVIEW_W", 512))

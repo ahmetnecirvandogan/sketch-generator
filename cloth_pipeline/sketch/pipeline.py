@@ -12,7 +12,7 @@ import os
 import cv2
 import numpy as np
 
-from cloth_pipeline.paths import DATASET_DIR
+
 from cloth_pipeline.sketch.constants import SKETCH_BGR, USE_TEXTURE_STROKES
 from cloth_pipeline.sketch.drawing import (
     albedo_pattern_stroke_mask,
@@ -39,7 +39,7 @@ def generate_sketch(
 
     The returned canvas matches ``render_path``'s width/height exactly, so the
     sketch is pixel-aligned with the beauty render and the PBR maps written by
-    Stage 1 to ``outputs/<mesh>/view_<idx>/``.
+    Stage 1 to ``dataset/<mesh>/view_<idx>/``.
     """
     # Load as BGRA so we can extract the alpha channel saved by generate_dataset.
     # cv2.IMREAD_UNCHANGED preserves all 4 channels when they exist.
@@ -62,16 +62,14 @@ def generate_sketch(
 
     h, w = img_bgr.shape[:2]
 
-    # Derive companion data paths from frame string.
-    _base_name  = os.path.basename(render_path)
-    _frame_str  = os.path.splitext(_base_name)[0].split("_")[-1]
-    _norm_base  = os.path.join(DATASET_DIR, "normals", f"normals_{_frame_str}")
+    _sample_dir = os.path.dirname(render_path)
+    _norm_base  = os.path.join(_sample_dir, "normals")
     normal_path = (
         _norm_base + ".png"
         if os.path.exists(_norm_base + ".png")
         else _norm_base + ".npy"
     )
-    depth_path = os.path.join(DATASET_DIR, "depth", f"depth_{_frame_str}.npy")
+    depth_path = os.path.join(_sample_dir, "depth.npy")
 
     # White canvas (BGR)
     canvas = np.full((h, w, 3), 255, dtype=np.uint8)

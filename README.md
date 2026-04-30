@@ -1,10 +1,33 @@
-# Sketch generator
+# Sketch Generator
 
-Two-stage pipeline for synthetic cloth data: **Mitsuba 3** renders meshes with random materials and lighting, then a **computer-vision sketch pipeline** turns those renders into aligned conditioning images (edges, segmentation, hatching, labels).
+Three-stage pipeline for synthetic cloth dataset generation: **Blender** generates physically simulated draped cloth meshes, **Mitsuba 3** renders them with randomised materials and lighting, then a **computer-vision sketch pipeline** turns those renders into aligned conditioning images for ControlNet training.
+
+## Pipeline Overview
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  Stage 0 – Mesh Generation (Blender, headless)                   │
+│  mesh_generator.py                                               │
+│  Drops randomised cloth planes onto collision meshes with         │
+│  physics simulation → output_meshes/*.obj                        │
+├──────────────────────────────────────────────────────────────────┤
+│  Stage 1 – PBR Rendering (Mitsuba 3)                             │
+│  generate_dataset.py                                             │
+│  Loads meshes from output_meshes/ + cloth_meshes/, applies        │
+│  random materials/lighting, renders beauty + depth + normals      │
+│  → dataset/<mesh>/<material>/view_0/sample_N/                    │
+├──────────────────────────────────────────────────────────────────┤
+│  Stage 2 – Sketch Extraction                                     │
+│  generate_sketches.py                                            │
+│  Processes renders into line-art conditioning images              │
+│  → dataset/<mesh>/<material>/view_0/sample_N/sketch.png          │
+└──────────────────────────────────────────────────────────────────┘
+```
 
 ## Requirements
 
 - **Python 3.9+**
+- **Blender 3.4+** installed locally (macOS: `/Applications/Blender.app`)
 - **pip packages:** `numpy`, `opencv-python`, `Pillow`, `mitsuba`
 
 ```bash
@@ -13,7 +36,7 @@ source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install numpy opencv-python pillow mitsuba
 ```
 
-Place at least one **`.obj`** cloth mesh in `cloth_meshes/` before running Stage 1.
+Place at least one **`.obj`** cloth mesh in `cloth_meshes/` before running the pipeline.
 
 ### Optional (better edges / segmentation)
 
@@ -22,45 +45,90 @@ Place at least one **`.obj`** cloth mesh in `cloth_meshes/` before running Stage
 
 Optional `handwriting.ttf` in the project root improves label rendering; otherwise system fonts are used (see `cloth_pipeline/sketch/constants.py`).
 
-## Project layout
+## Project Layout
 
 | Path | Role |
 |------|------|
-| `cloth_meshes/` | Input `.obj` meshes (you provide) |
+| `cloth_meshes/` | Input `.obj` base/collision meshes (you provide) |
+| `output_meshes/` | Synthetically generated draped cloth meshes (Stage 0 output) |
+| `mesh_generator.py` | Headless Blender script for physics-based cloth generation |
+| `run_pipeline.sh` | One-command orchestrator that runs all three stages |
 | `cloth_pipeline/` | Library code (dataset render loop, sketch pipeline) |
-| `dataset/renders/` | Beauty PNGs composited on a light-gray background |
-| `dataset/depth/`, `dataset/normals/` | Per-frame `.npy` buffers |
-| `dataset/masks/` | Per-frame cloth alpha masks (`mask_XXXX.png`) for sketch segmentation |
-| `dataset/textures/` | Procedural texture PNGs |
-| `dataset/metadata.jsonl` | One JSON object per frame (lighting, material, paths, …) |
-| `dataset/conditioning/` | Output sketch conditioning images (Stage 2) |
+| `generate_dataset.py` | Stage 1 entry point (Mitsuba rendering) |
+| `generate_sketches.py` | Stage 2 entry point (sketch extraction) |
+| `dataset/` | All per-sample generated data (renders, depth, normals, sketch, etc) |
+| `dataset/metadata.jsonl` | One JSON object per frame (lighting, material, text prompt, paths, …) |
 
 ## Usage
 
-Run from the **repository root**.
+### Quick Start — Run Everything
 
-**Stage 1 — synthetic renders**
+From the **repository root**, run the full pipeline with a single command:
+
+```bash
+./run_pipeline.sh
+```
+
+This will sequentially execute all three stages:
+1. Generate 10 new draped cloth meshes via Blender
+2. Render all meshes (new + base) with Mitsuba
+3. Extract sketch conditioning images
+
+### Stage 0 — Mesh Generation (Blender)
+
+Generate physically simulated draped cloth meshes:
+
+```bash
+/Applications/Blender.app/Contents/MacOS/Blender -b -P mesh_generator.py -- --variations 10
+```
+
+**CLI flags:**
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--variations` | `5` | Number of unique cloth meshes to generate |
+| `--subdivisions` | `40` | Mesh detail level (higher = more vertices) |
+| `--target_frame` | `100` | Physics simulation length (frames) |
+| `--input_dir` | `cloth_meshes` | Folder containing collision base meshes |
+| `--output_dir` | `output_meshes` | Folder to save generated `.obj` files |
+
+**Randomisation per mesh:**
+- **Base mesh**: Randomly selected from `cloth_meshes/`
+- **Cloth shape**: Square, Rectangle, or Scarf (with optional U-bend for worn scarf look)
+- **Fabric physics**: Thin Scarf, Silk, Cotton, or Denim presets (mass, stiffness, bending)
+- **Drop angle**: Random rotation and tilt before simulation
+- **Friction**: Randomised collision friction
+
+### Stage 1 — PBR Rendering (Mitsuba 3)
 
 ```bash
 python generate_dataset.py
 ```
 
-Default sample count is set in `cloth_pipeline/dataset/render_loop.py` (`run_generation`). Existing frames are skipped when outputs and metadata already exist (checkpointing).
+Scans **both** `output_meshes/` and `cloth_meshes/` for `.obj` files. New generated meshes are rendered **first** so you can quickly validate them.
 
-Stage 1 writes:
-- render image with visible light-gray background (easy to inspect; no checkerboard transparency preview)
-- depth + normals as `.npy`
-- binary cloth mask in `dataset/masks/` used by Stage 2 segmentation
+Default: 3 materials × 2 lightings = **6 renders per mesh**.
 
-**Stage 2 — sketches from metadata**
+```bash
+python generate_dataset.py --materials-per-mesh 5 --lightings-per-material 3
+```
+
+Existing frames are skipped when outputs and metadata already exist (checkpointing).
+
+**Outputs per frame:**
+- Beauty render with light-gray background
+- Depth + normals as `.npy`
+- Binary cloth mask
+- PBR ground truth maps (albedo, normal, roughness)
+
+### Stage 2 — Sketch Extraction
 
 ```bash
 python generate_sketches.py
 ```
 
-Requires `dataset/metadata.jsonl` and the render paths it references (normally after Stage 1). Existing `conditioning_*.png` files are skipped.
+Requires `dataset/metadata.jsonl` and the render paths it references (normally after Stage 1). Existing sketches are skipped.
 
-### Sketch options
+### Sketch Options
 
 Texture/pattern strokes are disabled by default to avoid grid artifacts in conditioning sketches.
 
@@ -69,6 +137,16 @@ Texture/pattern strokes are disabled by default to avoid grid artifacts in condi
 - Or use the short alias:
   - `UTS=1 python generate_sketches.py`
 
-## Mitsuba note
+## Training Data Format
+
+`dataset/metadata.jsonl` is a HuggingFace-compatible JSONL file. Each line contains:
+- `text`: Natural language prompt describing the material and pattern (e.g., *"Cloth Scarf, leather material, a photorealistic 3D render of a leather cloth with houndstooth pattern"*)
+- `file_name`: Path to the beauty render
+- `conditioning_image`: Path to the sketch
+- Full material properties, lighting config, and camera parameters
+
+This format is directly loadable by `datasets.load_dataset()` for ControlNet/Stable Diffusion fine-tuning.
+
+## Mitsuba Note
 
 The renderer uses `scalar_rgb`. If `pip install mitsuba` fails on your platform, follow the [Mitsuba 3 documentation](https://mitsuba.readthedocs.io/) for build or variant requirements.

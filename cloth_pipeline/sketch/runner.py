@@ -1,4 +1,4 @@
-"""Batch over metadata.jsonl → outputs/<mesh>/view_<idx>/sketch.png."""
+"""Batch over metadata.jsonl → dataset/<mesh>/view_<idx>/sketch.png."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import os
 
 import cv2
 
-from cloth_pipeline.paths import BASE_DIR, DATASET_DIR, METADATA_PATH
+from cloth_pipeline.paths import BASE_DIR, METADATA_PATH
 from cloth_pipeline.sketch.pipeline import generate_sketch
 
 
@@ -39,7 +39,7 @@ def run_from_metadata() -> None:
     for meta in records:
         frame_str   = meta["frame"]
         render_path = os.path.join(
-            DATASET_DIR, meta.get("file_name", f"renders/render_{frame_str}.png")
+            BASE_DIR, meta.get("file_name", f"renders/render_{frame_str}.png")
         )
 
         sketch_rel = meta.get("sketch_path")
@@ -55,11 +55,11 @@ def run_from_metadata() -> None:
 
         tex_rel = _albedo_rel_from_meta(meta)
         albedo_map_path = (
-            os.path.join(DATASET_DIR, tex_rel) if tex_rel else None
+            os.path.join(BASE_DIR, tex_rel) if tex_rel else None
         )
         mask_rel = meta.get("mask_image")
         alpha_mask_path = (
-            os.path.join(DATASET_DIR, mask_rel) if mask_rel else None
+            os.path.join(BASE_DIR, mask_rel) if mask_rel else None
         )
 
         try:
