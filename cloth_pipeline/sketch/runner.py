@@ -1,4 +1,4 @@
-"""Batch over metadata.jsonl → outputs/<mesh>/view_<idx>/sketch.png."""
+"""Batch over metadata.jsonl → dataset/<mesh>/view_<idx>/sketch.png."""
 
 from __future__ import annotations
 

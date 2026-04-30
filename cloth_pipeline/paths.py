@@ -7,13 +7,13 @@ _PKG_DIR = os.path.dirname(os.path.abspath(__file__))
 BASE_DIR = os.path.dirname(_PKG_DIR)
 
 MESHES_DIR = os.path.join(BASE_DIR, "cloth_meshes")
-OUTPUTS_DIR = os.path.join(BASE_DIR, "outputs")
-METADATA_PATH = os.path.join(OUTPUTS_DIR, "metadata.jsonl")
-FRONT_PREVIEW_DIR = os.path.join(OUTPUTS_DIR, "front_previews")
+DATASET_DIR = os.path.join(BASE_DIR, "dataset")
+METADATA_PATH = os.path.join(DATASET_DIR, "metadata.jsonl")
+FRONT_PREVIEW_DIR = os.path.join(DATASET_DIR, "front_previews")
 
 # Training-ready outputs (sketch + PBR maps), grouped per mesh / view.
 # Stage 1 writes albedo/normal/roughness here; Stage 2 writes sketch here.
-# Layout: outputs/mesh_<sanitized_stem>/view_<idx>/{sketch,albedo,normal,roughness}.png
+# Layout: dataset/mesh_<sanitized_stem>/view_<idx>/{sketch,albedo,normal,roughness}.png
 
 
 
@@ -54,7 +54,7 @@ def output_sample_dir(
     """Absolute path to the per-(mesh, material+pattern, view, frame) directory."""
     parts = sample_dir_components(mesh_path, material_type, pattern_name, view_idx, frame_id)
     return os.path.join(
-        OUTPUTS_DIR,
+        DATASET_DIR,
         parts["mesh_dir_name"],
         parts["material_pattern_dir_name"],
         f"view_{parts['view_idx']}",
@@ -65,7 +65,7 @@ def output_sample_dir(
 def ensure_dataset_stage_dirs() -> None:
     """Create flat intermediate dirs + the outputs/ root (per-mesh subdirs are
     created on demand at write time)."""
-    for d in (MESHES_DIR, OUTPUTS_DIR):
+    for d in (MESHES_DIR, DATASET_DIR):
         os.makedirs(d, exist_ok=True)
 
 

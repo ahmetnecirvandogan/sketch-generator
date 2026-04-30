@@ -39,7 +39,7 @@ def generate_sketch(
 
     The returned canvas matches ``render_path``'s width/height exactly, so the
     sketch is pixel-aligned with the beauty render and the PBR maps written by
-    Stage 1 to ``outputs/<mesh>/view_<idx>/``.
+    Stage 1 to ``dataset/<mesh>/view_<idx>/``.
     """
     # Load as BGRA so we can extract the alpha channel saved by generate_dataset.
     # cv2.IMREAD_UNCHANGED preserves all 4 channels when they exist.

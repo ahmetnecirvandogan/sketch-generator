@@ -15,12 +15,12 @@ Three-stage pipeline for synthetic cloth dataset generation: **Blender** generat
 │  generate_dataset.py                                             │
 │  Loads meshes from output_meshes/ + cloth_meshes/, applies        │
 │  random materials/lighting, renders beauty + depth + normals      │
-│  → outputs/<mesh>/<material>/view_0/sample_N/                    │
+│  → dataset/<mesh>/<material>/view_0/sample_N/                    │
 ├──────────────────────────────────────────────────────────────────┤
 │  Stage 2 – Sketch Extraction                                     │
 │  generate_sketches.py                                            │
 │  Processes renders into line-art conditioning images              │
-│  → outputs/<mesh>/<material>/view_0/sample_N/sketch.png          │
+│  → dataset/<mesh>/<material>/view_0/sample_N/sketch.png          │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -56,8 +56,8 @@ Optional `handwriting.ttf` in the project root improves label rendering; otherwi
 | `cloth_pipeline/` | Library code (dataset render loop, sketch pipeline) |
 | `generate_dataset.py` | Stage 1 entry point (Mitsuba rendering) |
 | `generate_sketches.py` | Stage 2 entry point (sketch extraction) |
-| `outputs/` | All per-sample generated data (renders, depth, normals, sketch, etc) |
-| `outputs/metadata.jsonl` | One JSON object per frame (lighting, material, text prompt, paths, …) |
+| `dataset/` | All per-sample generated data (renders, depth, normals, sketch, etc) |
+| `dataset/metadata.jsonl` | One JSON object per frame (lighting, material, text prompt, paths, …) |
 
 ## Usage
 
@@ -126,7 +126,7 @@ Existing frames are skipped when outputs and metadata already exist (checkpointi
 python generate_sketches.py
 ```
 
-Requires `outputs/metadata.jsonl` and the render paths it references (normally after Stage 1). Existing sketches are skipped.
+Requires `dataset/metadata.jsonl` and the render paths it references (normally after Stage 1). Existing sketches are skipped.
 
 ### Sketch Options
 
@@ -139,7 +139,7 @@ Texture/pattern strokes are disabled by default to avoid grid artifacts in condi
 
 ## Training Data Format
 
-`outputs/metadata.jsonl` is a HuggingFace-compatible JSONL file. Each line contains:
+`dataset/metadata.jsonl` is a HuggingFace-compatible JSONL file. Each line contains:
 - `text`: Natural language prompt describing the material and pattern (e.g., *"Cloth Scarf, leather material, a photorealistic 3D render of a leather cloth with houndstooth pattern"*)
 - `file_name`: Path to the beauty render
 - `conditioning_image`: Path to the sketch

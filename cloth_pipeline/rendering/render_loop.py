@@ -19,7 +19,7 @@ from cloth_pipeline.paths import (
     FRONT_PREVIEW_DIR,
     MESHES_DIR,
     METADATA_PATH,
-    OUTPUTS_DIR,
+    DATASET_DIR,
     ensure_dataset_stage_dirs,
     ensure_front_preview_dir,
     output_sample_dir,
@@ -159,7 +159,7 @@ def run_generation(
     print(f"Gen meshes dir  : {OUTPUT_MESHES_DIR}")
     print(f"  Found         : {len(output_mesh_files)} .obj file(s)")
     print(f"Total found     : {len(mesh_files)} .obj file(s)")
-    print(f"Outputs dir     : {OUTPUTS_DIR}")
+    print(f"Dataset dir     : {DATASET_DIR}")
     print("------------------------\\n")
 
     if not mesh_files:
@@ -834,7 +834,7 @@ def run_generation(
             f.write(json.dumps(record) + '\n')
 
     print(f"\n✓ Done!  {num_samples} render sets saved.")
-    print(f"  • PBR maps + info → {OUTPUTS_DIR}/mesh_<stem>/<mat>_<pat>/view_0/sample_NNNN/")
+    print(f"  • PBR maps + info → {DATASET_DIR}/mesh_<stem>/<mat>_<pat>/view_0/sample_NNNN/")
     print(f"  • metadata index  → {METADATA_PATH}")
     print("\nNext: run  python generate_sketches.py  to write sketch.png next to PBR maps.")
 

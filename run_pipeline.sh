@@ -48,4 +48,4 @@ python generate_sketches.py
 echo "Done extracting sketches."
 
 echo ""
-echo "Pipeline completed successfully! Your data is ready in the 'outputs' directory."
+echo "Pipeline completed successfully! Your data is ready in the 'dataset' directory."
