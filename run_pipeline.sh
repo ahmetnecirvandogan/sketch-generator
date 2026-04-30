@@ -27,8 +27,8 @@ echo "Using Blender: $BLENDER_BIN"
 echo "================================================="
 echo "   STAGE 0: Mesh Generation (Blender)"
 echo "================================================="
-# Generate 10 variations by default. Change this number as needed.
-"$BLENDER_BIN" -b -P mesh_generator.py -- --variations 10 --subdivisions 40
+# Generate 5 variations by default. Change this number as needed.
+"$BLENDER_BIN" -b -P mesh_generator.py -- --variations 5 --subdivisions 40
 echo "Done generating meshes."
 
 echo ""
@@ -48,4 +48,4 @@ python generate_sketches.py
 echo "Done extracting sketches."
 
 echo ""
-echo "Pipeline completed successfully! Your data is ready in the 'dataset' directory."
+echo "Pipeline completed successfully! Your data is ready in the 'outputs' directory."
