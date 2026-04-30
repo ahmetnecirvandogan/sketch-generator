@@ -128,19 +128,22 @@ def run_generation(
 
     OUTPUT_MESHES_DIR = os.path.join(BASE_DIR, "output_meshes")
     # Render output_meshes first so new generations can be checked immediately
-    mesh_files = (
-        sorted(glob.glob(os.path.join(OUTPUT_MESHES_DIR, "*.obj"))) +
-        sorted(glob.glob(os.path.join(MESHES_DIR, "*.obj")))
-    )
+    output_mesh_files = sorted(glob.glob(os.path.join(OUTPUT_MESHES_DIR, "*.obj")))
+    cloth_mesh_files = sorted(glob.glob(os.path.join(MESHES_DIR, "*.obj")))
+    mesh_files = output_mesh_files + cloth_mesh_files
+
     print("--- PATH DIAGNOSTICS ---")
-    print(f"Meshes dir  : {MESHES_DIR}")
-    print(f"  Found     : {len(mesh_files)} .obj file(s)")
-    print(f"Outputs dir : {OUTPUTS_DIR}")
+    print(f"Base meshes dir : {MESHES_DIR}")
+    print(f"  Found         : {len(cloth_mesh_files)} .obj file(s)")
+    print(f"Gen meshes dir  : {OUTPUT_MESHES_DIR}")
+    print(f"  Found         : {len(output_mesh_files)} .obj file(s)")
+    print(f"Total found     : {len(mesh_files)} .obj file(s)")
+    print(f"Outputs dir     : {OUTPUTS_DIR}")
     print("------------------------\\n")
 
     if not mesh_files:
-        print(f"[ERROR] No .obj files found in {MESHES_DIR}.")
-        print("Please add your cloth meshes to that folder and run again.")
+        print(f"[ERROR] No .obj files found in either {MESHES_DIR} or {OUTPUT_MESHES_DIR}.")
+        print("Please add your cloth meshes or generate new ones and run again.")
         raise SystemExit(1)
 
     samples_per_mesh = materials_per_mesh * lightings_per_material
@@ -814,7 +817,7 @@ def run_front_mesh_previews(*, only_stem: str | None = None) -> None:
         sorted(glob.glob(os.path.join(MESHES_DIR, "*.obj")))
     )
     if not mesh_files:
-        print(f"[ERROR] No .obj files found in {MESHES_DIR}.")
+        print(f"[ERROR] No .obj files found in either {MESHES_DIR} or {OUTPUT_MESHES_DIR}.")
         raise SystemExit(1)
     if only_stem:
         mesh_files = [
@@ -823,7 +826,7 @@ def run_front_mesh_previews(*, only_stem: str | None = None) -> None:
             if os.path.basename(p).replace(".obj", "") == only_stem
         ]
         if not mesh_files:
-            print(f"[ERROR] No mesh matching stem {only_stem!r} in {MESHES_DIR}.")
+            print(f"[ERROR] No mesh matching stem {only_stem!r} in {MESHES_DIR} or {OUTPUT_MESHES_DIR}.")
             raise SystemExit(1)
 
     prev_w = max(64, _env_int("NECH_PREVIEW_W", 512))

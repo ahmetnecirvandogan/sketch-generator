@@ -14,7 +14,7 @@ def get_args():
         argv = argv[argv.index("--") + 1:]
     
     parser = argparse.ArgumentParser(description="Generate draped cloth meshes.")
-    parser.add_argument("--variations", type=int, default=1, help="Number of variations to generate")
+    parser.add_argument("--variations", type=int, default=5, help="Number of variations to generate")
     parser.add_argument("--input_dir", type=str, default="cloth_meshes", help="Directory with base collision meshes")
     parser.add_argument("--output_dir", type=str, default="output_meshes", help="Directory to save generated .obj files")
     parser.add_argument("--subdivisions", type=int, default=50, help="Subdivisions for cloth plane")
