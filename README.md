@@ -15,24 +15,36 @@ Runs once, offline. Owner: Neçirvan.
 │  Stage 0 — Mesh Generation (Blender, headless)                           │
 │  Drops randomised cloth onto collision meshes via physics simulation,    │
 │  freezes a frame, exports the deformed cloth as .obj.                    │
-│  → output_meshes/*.obj                                                   │
-├──────────────────────────────────────────────────────────────────────────┤
+└────────────────────────────────────┬─────────────────────────────────────┘
+                                     │
+                                     ▼
+                              output_meshes/*.obj
+                                     │
+                                     ▼
+┌──────────────────────────────────────────────────────────────────────────┐
 │  Stage 1 — PBR Rendering (Mitsuba 3)                                     │
 │  Loads each .obj, applies a random material + lighting + view, renders   │
 │  aligned PBR ground-truth maps and auxiliary buffers per sample.         │
-│  → dataset/<mesh>/<material>_<pattern>/view_<n>/sample_<NNNN>/           │
-├──────────────────────────────────────────────────────────────────────────┤
+└────────────────────────────────────┬─────────────────────────────────────┘
+                                     │
+                                     ▼
+              dataset/<mesh>/<material>_<pattern>/view_<n>/sample_<NNNN>/
+                                     │
+                                     ▼
+┌──────────────────────────────────────────────────────────────────────────┐
 │  Stage 2 — Sketch Extraction                                             │
 │  Converts each beauty render into an aligned line-art conditioning       │
 │  image, written next to the PBR maps for that sample.                    │
-│  → sketch.png inside each sample_<NNNN>/                                 │
+└────────────────────────────────────┬─────────────────────────────────────┘
+                                     │
+                                     ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│  OUTPUT — per-sample folder                                              │
+│                                                                          │
+│   sketch.png       render.png       albedo.png       roughness.png       │
+│   normal.png       prompt.txt       mask.png         texture.png         │
+│   depth.npy        normals.npy      metadata.json                        │
 └──────────────────────────────────────────────────────────────────────────┘
-
-Per-sample folder (dataset/<mesh>/<material>_<pattern>/view_<n>/sample_<NNNN>/):
-
-   sketch.png       render.png       albedo.png       roughness.png
-   normal.png       prompt.txt       mask.png         texture.png
-   depth.npy        normals.npy      metadata.json
 ```
 
 **Legend**
@@ -57,7 +69,7 @@ Runs once per ablation variant. Owner: Acar. Required ablation per Dr. Montazeri
    ┌─────────────────────────────────────┐                    ┌─────────────────────────────────────┐
    │   U-Net encoder │ text encoder      │                    │   U-Net encoder │ text encoder      │
    ├─────────────────────────────────────┤                    ├─────────────────────────────────────┤
-   │   decoder — TWO output heads        │                    │   decoder — ONE output head         │
+   │   decoder                           │                    │   decoder                           │
    └────────┬─────────────────┬──────────┘                    └─────────────────┬───────────────────┘
             │                 │                                                 │
             ▼                 ▼                                                 ▼
@@ -84,24 +96,27 @@ End-user pipeline. Variant choice TBD with Prof. Sezgin.
    └────────┬───────────────────┬────────┘                  └────────┬───────────────────┬────────┘
             │                   │                                    │                   │
             ▼                   ▼                                    ▼                   ▼
-   ┌────────────────┐   ┌────────────────┐                  ┌─────────────────┐   ┌───────────────┐
-   │ Gemini API     │   │ Trained PBR    │                  │ In-house        │   │ Trained PBR   │
-   │ sketch → 2D    │   │ Model          │                  │ sketch → mesh   │   │ Model         │
-   │      ↓         │   │ sketch + text  │                  │ (FUTURE WORK)   │   │ sketch+text   │
-   │ Trellis        │   │ → albedo,      │                  │                 │   │ → albedo,     │
-   │ image → mesh   │   │   roughness    │                  │ → mesh          │   │   roughness   │
-   └────────┬───────┘   └────────┬───────┘                  └────────┬────────┘   └───────┬───────┘
-            │                    │                                   │                    │
-            └──────────┬─────────┘                                   └──────────┬─────────┘
-                       ▼                                                        ▼
-            ┌────────────────────┐                                   ┌────────────────────┐
-            │   Compositor       │                                   │   Compositor       │
-            │   (wrap maps → UV) │                                   │   (wrap maps → UV) │
-            └─────────┬──────────┘                                   └─────────┬──────────┘
-                      ▼                                                        ▼
-            ┌────────────────────┐                                   ┌────────────────────┐
-            │  textured 3D mesh  │                                   │  textured 3D mesh  │
-            └────────────────────┘                                   └────────────────────┘
+   ┌────────────────┐   ┌────────────────┐                  ┌────────────────┐   ┌────────────────┐
+   │ Gemini API     │   │ Trained PBR    │                  │ In-house       │   │ Trained PBR    │
+   │ sketch → 2D    │   │ Model          │                  │ sketch → mesh  │   │ Model          │
+   └────────┬───────┘   │ sketch + text  │                  │ Model          │   │ sketch + text  │
+            │           │ → albedo,      │                  │ (FUTURE WORK)  │   │ → albedo,      │
+            ▼           │   roughness    │                  │                │   │   roughness    │
+   ┌────────────────┐   └────────┬───────┘                  └────────┬───────┘   └────────┬───────┘
+   │ Trellis        │            │                                   │                    │
+   │ image → mesh   │            │                                   └─────────┬──────────┘
+   └────────┬───────┘            │                                             ▼
+            │                    │                                   ┌────────────────────┐
+            └──────────┬─────────┘                                   │   Compositor       │
+                       ▼                                             │   (wrap maps → UV) │
+            ┌────────────────────┐                                   └─────────┬──────────┘
+            │   Compositor       │                                             ▼
+            │   (wrap maps → UV) │                                   ┌────────────────────┐
+            └─────────┬──────────┘                                   │  textured 3D mesh  │
+                      ▼                                              └────────────────────┘
+            ┌────────────────────┐
+            │  textured 3D mesh  │
+            └────────────────────┘
 ```
 
 **Comparison**
