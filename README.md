@@ -1,6 +1,129 @@
 # Sketch Generator
 
-Three-stage pipeline for synthetic cloth dataset generation: **Blender** generates physically simulated draped cloth meshes, **Mitsuba 3** renders them with randomised materials and lighting, then a **computer-vision sketch pipeline** turns those renders into aligned conditioning images for ControlNet training.
+Three-stage pipeline for synthetic cloth dataset generation: **Blender** generates physically simulated draped cloth meshes, **Mitsuba 3** assembles each sample into a scene (mesh + randomised material + lighting + camera) and renders it, then a **computer-vision sketch pipeline** turns those renders into aligned conditioning images for ControlNet training.
+
+## Pipelines
+
+
+### Pipeline 1 — Training Data Generation
+
+Runs once, offline.
+
+```
+┌──────────────────────────────────────────────────────────┐
+│  Stage 0 — Mesh Generation (Blender, headless)           │
+└────────────────────────────┬─────────────────────────────┘
+                             │
+                             ▼
+                    output_meshes/*.obj
+                             │
+                             ▼
+┌──────────────────────────────────────────────────────────┐
+│  Stage 1 — PBR Rendering (Mitsuba 3)                     │
+│  scene = mesh + material + lighting + camera             │
+└────────────────────────────┬─────────────────────────────┘
+                             │
+                             ▼
+       all outputs below come from one render of the scene
+                             │
+                             ▼
+   render.png  albedo.png  roughness.png  normal.png  mask.png
+   texture.png  depth.npy  normals.npy
+   prompt.txt  metadata.json
+                             │
+                             ▼
+┌──────────────────────────────────────────────────────────┐
+│  Stage 2 — Sketch Extraction                             │
+└────────────────────────────┬─────────────────────────────┘
+                             │
+                             ▼
+                        sketch.png
+
+   All written into  dataset/<mesh>/<material>_<pattern>/view_<n>/sample_<NNNN>/
+```
+
+
+**Legend**
+- `sketch.png` — network input
+- `prompt.txt` — text conditioning input
+- `albedo.png` + `roughness.png` — Variant A training targets
+- `render.png` — Variant B training target
+- `metadata.json`'s `lighting_sh` field — 9 SH coefficients projected from the raw `lights[]` array. Variant A third training target (alongside albedo and roughness). Captures both ambient and directional lighting components.
+- `normal.png`, `mask.png`, `texture.png`, `depth.npy`, `normals.npy`, `metadata.json` — auxiliary
+
+### Pipeline 2 — Training
+
+```
+   VARIANT A — Separated PBR maps          VARIANT B — Combined render
+   (primary)                               (ablation)
+
+          sketch.png + prompt.txt                 sketch.png + prompt.txt
+                     │                                       │
+                     ▼                                       ▼
+   ┌──────────────────────────────────┐    ┌──────────────────────────────────┐
+   │          Neural Network          │    │          Neural Network          │
+   └──────┬─────────┬─────────┬───────┘    └────────────────┬─────────────────┘
+          │         │         │                             │
+          ▼         ▼         ▼                             ▼
+        albedo  roughness  lighting                   render (2D .png)
+                          (9 floats)
+
+   Loss:  L_albedo + λ₁·L_roughness        Loss:  L_render  (MSE)
+                   + λ₂·L_lighting  (MSE)
+```
+
+Variants share dataset, loader, and architecture. They differ only in output head and loss target.
+
+Lighting prediction in Variant A captures Dr. Montazeri's point that sketch highlight/shadow marks encode illumination as well as material. Variant B handles this implicitly via its end-to-end render target.
+
+**Not yet implemented.**
+
+### Pipeline 3 — Inference
+
+End-user pipeline.
+
+```
+   VARIANT 1 — Gemini + Trellis        VARIANT 2 — Fully in-house
+   (external)
+
+    user sketch + marks + prompt        user sketch + marks + prompt
+                │                                    │
+        ┌───────┴───────┐                   ┌────────┴────────┐
+        ▼               ▼                   ▼                 ▼
+   ┌──────────┐  ┌──────────────┐    ┌────────────┐  ┌─────────────────┐
+   │  Gemini  │  │ Trained PBR  │    │  In-house  │  │   Trained PBR   │
+   │   API    │  │    Model     │    │  sketch →  │  │      Model      │
+   └────┬─────┘  └──────┬───────┘    │    mesh    │  └────────┬────────┘
+        │               │            │  (FUTURE)  │           │
+        ▼               ▼            └─────┬──────┘           ▼
+    2D image     albedo + roughness        │           albedo + roughness
+                        + lighting                             + lighting
+        │               │                  ▼                  │
+        ▼               │                mesh                 │
+   ┌──────────┐         │                  │                  │
+   │ Trellis  │         │                  └─────────┬────────┘
+   └────┬─────┘         │                            ▼
+        │               │                   ┌────────────────┐
+        ▼               │                   │   Compositor   │
+       mesh             │                   └────────┬───────┘
+        │               │                            │
+        └───────┬───────┘                            ▼
+                ▼                                  Scene
+        ┌────────────────┐
+        │   Compositor   │
+        └────────┬───────┘
+                 │
+                 ▼
+               Scene
+```
+
+**Comparison**
+- **Variant 1**: external dependency (Gemini, Trellis).
+- **Variant 2**: fully in-house. Requires sketch → mesh model. 
+
+Lighting is predicted as 9 SH coefficients. At render time, the user can use the predicted lighting (reproducing the sketch's intended scene) or override with custom lighting (relighting the textured mesh freely). This preserves artist control over relighting while honoring the illumination cues drawn into the sketch.
+
+**Not yet implemented. Variant choice pending supervisor input.**
 
 ## Pipeline Overview
 
@@ -13,8 +136,8 @@ Three-stage pipeline for synthetic cloth dataset generation: **Blender** generat
 ├──────────────────────────────────────────────────────────────────┤
 │  Stage 1 – PBR Rendering (Mitsuba 3)                             │
 │  generate_dataset.py                                             │
-│  Loads meshes from output_meshes/ + cloth_meshes/, applies        │
-│  random materials/lighting, renders beauty + depth + normals      │
+│  Builds a scene per sample (mesh + random material + lighting    │
+│  + camera) and renders it, writing every AOV in one pass          │
 │  → dataset/<mesh>/<material>/view_0/sample_N/                    │
 ├──────────────────────────────────────────────────────────────────┤
 │  Stage 2 – Sketch Extraction                                     │
