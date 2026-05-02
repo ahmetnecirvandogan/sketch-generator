@@ -2,6 +2,114 @@
 
 Three-stage pipeline for synthetic cloth dataset generation: **Blender** generates physically simulated draped cloth meshes, **Mitsuba 3** renders them with randomised materials and lighting, then a **computer-vision sketch pipeline** turns those renders into aligned conditioning images for ControlNet training.
 
+## Pipelines
+
+Forward-looking design document. Pipeline 1 (data generation) is built today; Pipelines 2 (training) and 3 (inference) are not yet implemented.
+
+### Pipeline 1 — Training Data Generation
+
+Runs once, offline. Owner: Neçirvan.
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│  Stage 0 — Mesh Generation (Blender, headless)                           │
+│  Drops randomised cloth onto collision meshes via physics simulation,    │
+│  freezes a frame, exports the deformed cloth as .obj.                    │
+│  → output_meshes/*.obj                                                   │
+├──────────────────────────────────────────────────────────────────────────┤
+│  Stage 1 — PBR Rendering (Mitsuba 3)                                     │
+│  Loads each .obj, applies a random material + lighting + view, renders   │
+│  aligned PBR ground-truth maps and auxiliary buffers per sample.         │
+│  → dataset/<mesh>/<material>_<pattern>/view_<n>/sample_<NNNN>/           │
+├──────────────────────────────────────────────────────────────────────────┤
+│  Stage 2 — Sketch Extraction                                             │
+│  Converts each beauty render into an aligned line-art conditioning       │
+│  image, written next to the PBR maps for that sample.                    │
+│  → sketch.png inside each sample_<NNNN>/                                 │
+└──────────────────────────────────────────────────────────────────────────┘
+
+Per-sample folder (dataset/<mesh>/<material>_<pattern>/view_<n>/sample_<NNNN>/):
+
+   sketch.png       render.png       albedo.png       roughness.png
+   normal.png       prompt.txt       mask.png         texture.png
+   depth.npy        normals.npy      metadata.json
+```
+
+**Legend**
+- `sketch.png` — network input
+- `prompt.txt` — text conditioning input
+- `albedo.png` + `roughness.png` — Variant A training targets
+- `render.png` — Variant B training target
+- `normal.png`, `mask.png`, `texture.png`, `depth.npy`, `normals.npy`, `metadata.json` — auxiliary
+
+### Pipeline 2 — Training
+
+Runs once per ablation variant. Owner: Acar. Required ablation per Dr. Montazeri.
+
+```
+   VARIANT A — Separated PBR maps (primary)                   VARIANT B — Combined render (ablation)
+
+   ┌─────────────────────────────────────┐                    ┌─────────────────────────────────────┐
+   │   sketch.png   +   prompt.txt       │                    │   sketch.png   +   prompt.txt       │
+   └────────┬──────────────────┬─────────┘                    └────────┬──────────────────┬─────────┘
+            │                  │                                       │                  │
+            ▼                  ▼                                       ▼                  ▼
+   ┌─────────────────────────────────────┐                    ┌─────────────────────────────────────┐
+   │   U-Net encoder │ text encoder      │                    │   U-Net encoder │ text encoder      │
+   ├─────────────────────────────────────┤                    ├─────────────────────────────────────┤
+   │   decoder — TWO output heads        │                    │   decoder — ONE output head         │
+   └────────┬─────────────────┬──────────┘                    └─────────────────┬───────────────────┘
+            │                 │                                                 │
+            ▼                 ▼                                                 ▼
+   ┌────────────────┐  ┌─────────────────┐                    ┌─────────────────────────────────────┐
+   │     albedo     │  │    roughness    │                    │              render                 │
+   └────────────────┘  └─────────────────┘                    └─────────────────────────────────────┘
+
+   Loss:  L_albedo + λ · L_roughness  (MSE)                   Loss:  L_render  (MSE)
+```
+
+Variants share dataset, loader, and architecture. They differ only in output head and loss target. Compared on a held-out test set via PSNR/SSIM.
+
+**Not yet implemented.**
+
+### Pipeline 3 — Inference
+
+End-user pipeline. Variant choice TBD with Prof. Sezgin.
+
+```
+   VARIANT 1 — Gemini + Trellis (external)                  VARIANT 2 — Fully in-house
+
+   ┌─────────────────────────────────────┐                  ┌─────────────────────────────────────┐
+   │  user sketch + marks + text prompt  │                  │  user sketch + marks + text prompt  │
+   └────────┬───────────────────┬────────┘                  └────────┬───────────────────┬────────┘
+            │                   │                                    │                   │
+            ▼                   ▼                                    ▼                   ▼
+   ┌────────────────┐   ┌────────────────┐                  ┌─────────────────┐   ┌───────────────┐
+   │ Gemini API     │   │ Trained PBR    │                  │ In-house        │   │ Trained PBR   │
+   │ sketch → 2D    │   │ Model          │                  │ sketch → mesh   │   │ Model         │
+   │      ↓         │   │ sketch + text  │                  │ (FUTURE WORK)   │   │ sketch+text   │
+   │ Trellis        │   │ → albedo,      │                  │                 │   │ → albedo,     │
+   │ image → mesh   │   │   roughness    │                  │ → mesh          │   │   roughness   │
+   └────────┬───────┘   └────────┬───────┘                  └────────┬────────┘   └───────┬───────┘
+            │                    │                                   │                    │
+            └──────────┬─────────┘                                   └──────────┬─────────┘
+                       ▼                                                        ▼
+            ┌────────────────────┐                                   ┌────────────────────┐
+            │   Compositor       │                                   │   Compositor       │
+            │   (wrap maps → UV) │                                   │   (wrap maps → UV) │
+            └─────────┬──────────┘                                   └─────────┬──────────┘
+                      ▼                                                        ▼
+            ┌────────────────────┐                                   ┌────────────────────┐
+            │  textured 3D mesh  │                                   │  textured 3D mesh  │
+            └────────────────────┘                                   └────────────────────┘
+```
+
+**Comparison**
+- **Variant 1**: external dependency (Gemini, Trellis). Demo-ready now. Narrower research contribution.
+- **Variant 2**: fully in-house. Requires sketch → mesh model. Broader research contribution.
+
+**Not yet implemented. Variant choice pending supervisor input.**
+
 ## Pipeline Overview
 
 ```
