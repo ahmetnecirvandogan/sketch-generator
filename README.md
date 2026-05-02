@@ -108,13 +108,13 @@ End-user pipeline.
        mesh             │                   └────────┬───────┘
         │               │                            │
         └───────┬───────┘                            ▼
-                ▼                            textured 3D scene
+                ▼                                  Scene
         ┌────────────────┐
         │   Compositor   │
         └────────┬───────┘
                  │
                  ▼
-         textured 3D scene
+               Scene
 ```
 
 **Comparison**
