@@ -4,7 +4,6 @@ Three-stage pipeline for synthetic cloth dataset generation: **Blender** generat
 
 ## Pipelines
 
-Forward-looking design document. Pipeline 1 (data generation) is built today; Pipelines 2 (training) and 3 (inference) are not yet implemented.
 
 ### Pipeline 1 — Training Data Generation
 
@@ -43,7 +42,6 @@ Runs once, offline.
    All written into  dataset/<mesh>/<material>_<pattern>/view_<n>/sample_<NNNN>/
 ```
 
-Lighting SH projection: one-time preprocessing script (TODO, ~30 lines NumPy) reads each sample's metadata.json lights[] array, projects into 9 spherical harmonic coefficients, and writes them back into the same metadata.json as a new lighting_sh field.
 
 **Legend**
 - `sketch.png` — network input
@@ -82,7 +80,7 @@ Lighting prediction in Variant A captures Dr. Montazeri's point that sketch high
 
 ### Pipeline 3 — Inference
 
-End-user pipeline. Variant choice TBD with Prof. Sezgin.
+End-user pipeline.
 
 ```
    VARIANT 1 — Gemini + Trellis        VARIANT 2 — Fully in-house
@@ -120,8 +118,8 @@ End-user pipeline. Variant choice TBD with Prof. Sezgin.
 ```
 
 **Comparison**
-- **Variant 1**: external dependency (Gemini, Trellis). Demo-ready now. Narrower research contribution.
-- **Variant 2**: fully in-house. Requires sketch → mesh model. Broader research contribution.
+- **Variant 1**: external dependency (Gemini, Trellis).
+- **Variant 2**: fully in-house. Requires sketch → mesh model. 
 
 Lighting is predicted as 9 SH coefficients. At render time, the user can use the predicted lighting (reproducing the sketch's intended scene) or override with custom lighting (relighting the textured mesh freely). This preserves artist control over relighting while honoring the illumination cues drawn into the sketch.
 
