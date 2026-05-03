@@ -182,6 +182,30 @@ Optional `handwriting.ttf` in the project root improves label rendering; otherwi
 | `dataset/` | All per-sample generated data (renders, depth, normals, sketch, etc) |
 | `dataset/metadata.jsonl` | One JSON object per frame (lighting, material, text prompt, paths, …) |
 
+## Mesh Sources
+
+Stage 1 reads `.obj` meshes from `cloth_meshes/` (sourced) and `output_meshes/` (Stage 0's draped output). The sourced pool is being expanded in two phases to address Dr. Montazeri's diversity feedback:
+
+**Phase 1 — TurboSquid bootstrap (PR #24, in review):** 5 free garment meshes (skirts, pants, jeans) added alongside the original 6 scarves. Quick stopgap to broaden cloth shape variety beyond flat scarves.
+
+**Phase 2 — DeepFashion3D V2 (in progress, issue #17):** real-world garment scans from CUHK-SZ GAP LAB. ~590 registered meshes across 9 categories:
+
+| Category | Count | Description |
+|---|---|---|
+| `long_sleeve_upper` | ~150 | Long-sleeve tops, shirts, sweaters |
+| `short_sleeve_upper` | ~95 | T-shirts, short-sleeve blouses |
+| `no_sleeve_upper` | ~30 | Tank tops, sleeveless tops |
+| `long_sleeve_dress` | ~13 | Long-sleeve dresses |
+| `short_sleeve_dress` | ~36 | Short-sleeve dresses |
+| `no_sleeve_dress` | ~30 | Sleeveless dresses |
+| `long_pants` | ~20 | Full-length trousers |
+| `short_pants` | ~50 | Shorts |
+| `dress` | ~135 | Generic / loose dresses |
+
+DF3D V2 is licensed for academic research only (form-based access). We download `filtered_registered_mesh.rar` (~3.6 GB), pick a subset, copy them into `cloth_meshes/` with `df3d_<id>.obj` naming, and record provenance in `cloth_meshes/sources.txt`.
+
+CLOTH3D is kept on the radar as a future augmentation source (~7K animated draped sequences) but DF3D V2 is the primary because it's smaller, real-world, and ships ready-to-render `.obj`.
+
 ## Usage
 
 ### Quick Start — Run Everything
