@@ -1,0 +1,21 @@
+# Provenance for meshes in cloth_meshes/
+# Format: filename — source — license — notes
+# Fill in TurboSquid URLs/asset IDs as you find them.
+
+# --- Original 6 meshes (pre-TurboSquid expansion) ---
+10152_WomensScarf_v01_L3.obj — TurboSquid (asset 10152) — Standard Royalty-Free — original sourced mesh
+gabardine.obj — internal/manual — n/a — original sourced mesh
+uploads-files-1845153-Wool_Scarf.obj — TurboSquid uploads-files-1845153 — Standard Royalty-Free — original sourced mesh
+uploads-files-3794072-scarf.obj — TurboSquid uploads-files-3794072 — Standard Royalty-Free — original sourced mesh
+uploads-files-5614549-Scarf.obj — TurboSquid uploads-files-5614549 — Standard Royalty-Free — original sourced mesh
+uploads-files-994978-Scarf.obj — TurboSquid uploads-files-994978 — Standard Royalty-Free — original sourced mesh
+
+# --- New batch (2026-05-03, TurboSquid free) ---
+turbosquid_DG100074.obj — TurboSquid (TODO: paste URL) — Standard Royalty-Free — 64 MB
+turbosquid_jean.obj — TurboSquid (TODO: paste URL) — Standard Royalty-Free — Jeans
+turbosquid_pants.obj — TurboSquid (TODO: paste URL) — Standard Royalty-Free — Pants
+turbosquid_pencil_skirt.obj — TurboSquid asset 2223920 (women's office classic skirt) — Standard Royalty-Free — 12 MB
+turbosquid_obj.obj — TurboSquid (TODO: paste URL) — Standard Royalty-Free — generic name in source zip; rename if you find a better label
+
+# --- Skipped ---
+# obj_0.obj — 110 MB, exceeds GitHub's 100 MB hard limit; not committed.
