@@ -10,10 +10,8 @@
 # Ensure log directory exists
 mkdir -p logs
 
-# 1. Automatically find the project root (where this script lives)
-# This replaces the need for $WORK
-PROJECT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-cd "$PROJECT_ROOT"
+# 1. Use the directory where the job was submitted
+cd "$SLURM_SUBMIT_DIR"
 echo "Working directory: $(pwd)"
 
 # 2. Correct way to activate Conda in a SLURM script
