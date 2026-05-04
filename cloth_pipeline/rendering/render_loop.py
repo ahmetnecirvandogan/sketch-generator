@@ -554,13 +554,23 @@ def run_generation(
         # For other buckets: original template with mesh-name + material + pattern.
         bucket_name = bucket_for_mesh_path(current_mesh_path)
         if bucket_name == "df3d":
+            # We do NOT know the actual fabric material of a DF3D scan — the visible
+            # albedo is whatever was photographed. The `material_desc` we sampled was
+            # only to roll random BRDF parameters (roughness/sheen). Putting it in the
+            # prompt would lie to the network ("silk" with a wool-looking scan), so we
+            # drop it. We DO keep what's truthful: the garment category (from
+            # garment_type_list.txt), the rolled surface response, and the
+            # photogrammetry origin.
             cat = df3d_garment_category(current_mesh_path)
             cat_phrase = cat.replace("_", " ") if cat else "garment"
+            rough_desc_p = "matte" if roughness > 0.5 else "smooth" if roughness > 0.2 else "glossy"
+            sheen_desc_p = "with a velvety sheen" if sheen > 0.6 else "with subtle highlights"
             obj_name = cat_phrase
-            keyword  = f"{material_desc} {cat_phrase}"
+            keyword  = cat_phrase
             prompt = (
-                f"a photorealistic 3D render of a {material_desc} {cat_phrase}, "
-                f"real fabric texture, detailed folds and drape"
+                f"a photorealistic 3D render of a real {cat_phrase}, "
+                f"{rough_desc_p} {sheen_desc_p}, photogrammetry-scanned fabric, "
+                f"detailed folds and drape"
             )
         else:
             obj_name = _clean_mesh_name(mesh_name)
@@ -574,11 +584,11 @@ def run_generation(
         rough_desc = "matte surface" if roughness > 0.5 else "smooth finish" if roughness > 0.2 else "glossy finish"
         sheen_desc = "with a soft velvety sheen" if sheen > 0.6 else "with subtle highlights"
         if bucket_name == "df3d":
-            # No procedural pattern was applied — describe the real photogrammetry albedo.
+            # No procedural pattern, no random material claim — only what we know.
             texture_prompt = (
-                f"{material_desc} fabric texture, real photogrammetry albedo, "
-                f"a high-detail 3D render of {material_desc} fabric surface, "
-                f"{rough_desc}, {sheen_desc}, micro-texture surface detail, realistic cloth folds"
+                f"real photogrammetry albedo, photogrammetry-scanned fabric surface, "
+                f"a high-detail 3D render, {rough_desc}, {sheen_desc}, "
+                f"micro-texture surface detail, realistic cloth folds"
             )
         else:
             texture_prompt = (
@@ -823,7 +833,14 @@ def run_generation(
             "depth_image":        os.path.relpath(depth_path, BASE_DIR),
             "normals_image":      os.path.relpath(normals_path, BASE_DIR),
             "mask_image":         os.path.relpath(mask_path, BASE_DIR),
-            "text":               f"{obj_name}, {material_desc} material, {prompt}",
+            "text":               (
+                # DF3D: don't prepend the random material_desc — we don't know the
+                # actual fabric of the photogrammetry scan. The `prompt` already
+                # carries the truthful pieces (category + rolled BRDF descriptors).
+                f"{obj_name}, {prompt}"
+                if bucket_name == "df3d"
+                else f"{obj_name}, {material_desc} material, {prompt}"
+            ),
             "keyword":             keyword,
             "mesh_file":          os.path.relpath(current_mesh_path, BASE_DIR),
             # ── Camera parameters (Neural Contours Geometry Branch) ──
