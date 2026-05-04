@@ -13,6 +13,15 @@ import cv2
 import mitsuba as mi
 import numpy as np
 
+_DF3D_CAPTIONS = {}
+try:
+    _cap_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "meshes", "df3d", "captions.json")
+    if os.path.exists(_cap_path):
+        with open(_cap_path) as f:
+            _DF3D_CAPTIONS = json.load(f)
+except Exception:
+    pass
+
 from cloth_pipeline.rendering.textures import generate_random_albedo_map
 from cloth_pipeline.paths import (
     BASE_DIR,
@@ -566,19 +575,25 @@ def run_generation(
             rough_desc_p = "matte" if roughness > 0.5 else "smooth" if roughness > 0.2 else "glossy"
             sheen_desc_p = "with a velvety sheen" if sheen > 0.6 else "with subtle highlights"
             obj_name = cat_phrase
-            keyword  = cat_phrase
-            prompt = (
-                f"a photorealistic 3D render of a real {cat_phrase}, "
-                f"{rough_desc_p} {sheen_desc_p}, photogrammetry-scanned fabric, "
-                f"detailed folds and drape"
-            )
-        else:
-            obj_name = _clean_mesh_name(mesh_name)
-            keyword  = f"{material_desc} {obj_name}"
-            prompt = (
-                f"a photorealistic 3D render of a {material_desc} {obj_name} with "
-                f"{pattern_name} pattern, physical rendering, detailed fabric folds"
-            )
+        
+        # DF3D specific: Try to get detailed caption from the offline VLM pass
+        df3d_id = None
+        if "df3d" in current_mesh_path:
+             from cloth_pipeline.paths import _df3d_garment_id
+             df3d_id = _df3d_garment_id(current_mesh_path)
+
+        visual_desc = ""
+        if df3d_id and df3d_id in _DF3D_CAPTIONS:
+            visual_desc = f"{_DF3D_CAPTIONS[df3d_id]}, "
+        elif pattern_name == "photogrammetry":
+            visual_desc = "photogrammetry texture, "
+
+        obj_name = _clean_mesh_name(mesh_name)
+        keyword = f"{material_desc} {obj_name}"
+        prompt = (
+            f"a photorealistic 3D render of a {material_desc} {obj_name}, "
+            f"{visual_desc}physical rendering, detailed fabric folds"
+        )
 
         # --- TEXTURE-FOCUSED PROMPT (for prompt.txt only) ---
         rough_desc = "matte surface" if roughness > 0.5 else "smooth finish" if roughness > 0.2 else "glossy finish"
