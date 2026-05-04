@@ -58,6 +58,7 @@ ENV/
 # manual/ stays fully tracked (committed .obj files).
 meshes/df3d/*
 !meshes/df3d/README.md
+!meshes/df3d/captions.json
 !meshes/df3d/garment_type_list.txt
 meshes/procedural/*
 !meshes/procedural/README.md
