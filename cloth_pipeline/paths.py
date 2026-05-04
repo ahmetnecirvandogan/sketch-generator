@@ -1,5 +1,7 @@
 """Project-root paths used by Stage 1 (dataset) and Stage 2 (sketches)."""
 
+from __future__ import annotations
+
 import os
 import re
 
