@@ -17,6 +17,8 @@
 /dataset/textures/
 /dataset/conditioning/
 /dataset/outputs/
+# Pre-rename top-level outputs/ folder (deleted; defense against accidental recreation)
+/outputs/
 
 # Generated PBR output maps
 outputs/
