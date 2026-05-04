@@ -30,8 +30,17 @@ ENV/
 .idea/
 .vscode/
 
-# Generated meshes
-output_meshes/
+# Mesh buckets (issue #27)
+# meshes/manual/ stays tracked (hand-sourced .obj files committed to repo)
+# meshes/procedural/ — Stage 0's draped output, regeneratable, not committed
+meshes/procedural/*
+!meshes/procedural/.gitkeep
+# meshes/df3d/ — DeepFashion3D V2, large + academic-license, never pushed
+meshes/df3d/*
+!meshes/df3d/.gitkeep
+
+# Pre-#27 layout (kept commented for reference until everyone has migrated)
+# output_meshes/
 
 # Scratch test files
 test_bake.py

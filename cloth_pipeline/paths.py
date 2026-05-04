@@ -6,7 +6,17 @@ import re
 _PKG_DIR = os.path.dirname(os.path.abspath(__file__))
 BASE_DIR = os.path.dirname(_PKG_DIR)
 
-MESHES_DIR = os.path.join(BASE_DIR, "cloth_meshes")
+# Pre-#27 single-bucket layout (kept commented for reference)
+# MESHES_DIR = os.path.join(BASE_DIR, "cloth_meshes")
+
+# New three-bucket layout (issue #27)
+MANUAL_MESHES_DIR = os.path.join(BASE_DIR, "meshes", "manual")
+DF3D_MESHES_DIR = os.path.join(BASE_DIR, "meshes", "df3d")
+PROCEDURAL_MESHES_DIR = os.path.join(BASE_DIR, "meshes", "procedural")
+
+# Backward-compat alias: MESHES_DIR = manual bucket (replaces old cloth_meshes/).
+MESHES_DIR = MANUAL_MESHES_DIR
+
 DATASET_DIR = os.path.join(BASE_DIR, "dataset")
 METADATA_PATH = os.path.join(DATASET_DIR, "metadata.jsonl")
 FRONT_PREVIEW_DIR = os.path.join(DATASET_DIR, "front_previews")
@@ -63,9 +73,9 @@ def output_sample_dir(
 
 
 def ensure_dataset_stage_dirs() -> None:
-    """Create flat intermediate dirs + the outputs/ root (per-mesh subdirs are
+    """Create flat intermediate dirs + the dataset/ root (per-mesh subdirs are
     created on demand at write time)."""
-    for d in (MESHES_DIR, DATASET_DIR):
+    for d in (MANUAL_MESHES_DIR, DF3D_MESHES_DIR, PROCEDURAL_MESHES_DIR, DATASET_DIR):
         os.makedirs(d, exist_ok=True)
 
 

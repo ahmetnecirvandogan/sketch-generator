@@ -17,7 +17,10 @@ from cloth_pipeline.rendering.textures import generate_random_albedo_map
 from cloth_pipeline.paths import (
     BASE_DIR,
     FRONT_PREVIEW_DIR,
-    MESHES_DIR,
+    MANUAL_MESHES_DIR,
+    DF3D_MESHES_DIR,
+    PROCEDURAL_MESHES_DIR,
+    MESHES_DIR,  # backward-compat alias = MANUAL_MESHES_DIR (issue #27)
     METADATA_PATH,
     DATASET_DIR,
     ensure_dataset_stage_dirs,
@@ -133,6 +136,7 @@ def _suppress_mc_sparkles(rgb: np.ndarray) -> np.ndarray:
 def run_generation(
     materials_per_mesh: int = 3,
     lightings_per_material: int = 2,
+    exclude_manual: bool = False,
 ) -> None:
     """Three-level deterministic loop: mesh × (material+pattern) × lighting.
 
@@ -147,23 +151,33 @@ def run_generation(
     """
     ensure_dataset_stage_dirs()
 
-    OUTPUT_MESHES_DIR = os.path.join(BASE_DIR, "output_meshes")
-    # Render output_meshes first so new generations can be checked immediately
-    output_mesh_files = sorted(glob.glob(os.path.join(OUTPUT_MESHES_DIR, "*.obj")))
-    cloth_mesh_files = sorted(glob.glob(os.path.join(MESHES_DIR, "*.obj")))
-    mesh_files = output_mesh_files + cloth_mesh_files
+    # Pre-#27 layout (kept commented for reference):
+    # OUTPUT_MESHES_DIR = os.path.join(BASE_DIR, "output_meshes")
+    # output_mesh_files = sorted(glob.glob(os.path.join(OUTPUT_MESHES_DIR, "*.obj")))
+    # cloth_mesh_files = sorted(glob.glob(os.path.join(MESHES_DIR, "*.obj")))
+    # mesh_files = output_mesh_files + cloth_mesh_files
+
+    # New three-bucket scan (issue #27): procedural (Stage 0 output) first so new
+    # generations can be checked immediately, then df3d, then manual.
+    procedural_mesh_files = sorted(glob.glob(os.path.join(PROCEDURAL_MESHES_DIR, "*.obj")))
+    df3d_mesh_files = sorted(glob.glob(os.path.join(DF3D_MESHES_DIR, "*.obj")))
+    df3d_mesh_files += sorted(glob.glob(os.path.join(DF3D_MESHES_DIR, "*", "*.obj")))
+    manual_mesh_files = [] if exclude_manual else sorted(glob.glob(os.path.join(MANUAL_MESHES_DIR, "*.obj")))
+    mesh_files = procedural_mesh_files + df3d_mesh_files + manual_mesh_files
 
     print("--- PATH DIAGNOSTICS ---")
-    print(f"Base meshes dir : {MESHES_DIR}")
-    print(f"  Found         : {len(cloth_mesh_files)} .obj file(s)")
-    print(f"Gen meshes dir  : {OUTPUT_MESHES_DIR}")
-    print(f"  Found         : {len(output_mesh_files)} .obj file(s)")
-    print(f"Total found     : {len(mesh_files)} .obj file(s)")
-    print(f"Dataset dir     : {DATASET_DIR}")
+    print(f"Manual meshes dir     : {MANUAL_MESHES_DIR}{' [excluded]' if exclude_manual else ''}")
+    print(f"  Found               : {len(manual_mesh_files)} .obj file(s)")
+    print(f"DF3D meshes dir       : {DF3D_MESHES_DIR}")
+    print(f"  Found               : {len(df3d_mesh_files)} .obj file(s)")
+    print(f"Procedural meshes dir : {PROCEDURAL_MESHES_DIR}")
+    print(f"  Found               : {len(procedural_mesh_files)} .obj file(s)")
+    print(f"Total found           : {len(mesh_files)} .obj file(s)")
+    print(f"Dataset dir           : {DATASET_DIR}")
     print("------------------------\\n")
 
     if not mesh_files:
-        print(f"[ERROR] No .obj files found in either {MESHES_DIR} or {OUTPUT_MESHES_DIR}.")
+        print(f"[ERROR] No .obj files found in {MANUAL_MESHES_DIR}, {DF3D_MESHES_DIR}, or {PROCEDURAL_MESHES_DIR}.")
         print("Please add your cloth meshes or generate new ones and run again.")
         raise SystemExit(1)
 
@@ -839,7 +853,7 @@ def run_generation(
     print("\nNext: run  python generate_sketches.py  to write sketch.png next to PBR maps.")
 
 
-def run_front_mesh_previews(*, only_stem: str | None = None) -> None:
+def run_front_mesh_previews(*, only_stem: str | None = None, exclude_manual: bool = False) -> None:
     """
     One neutral render per mesh under dataset/front_previews/ using the same fixed
     front camera as the main dataset (identity mesh pose). For quick visual check
@@ -848,14 +862,20 @@ def run_front_mesh_previews(*, only_stem: str | None = None) -> None:
     If ``only_stem`` is set (OBJ basename without ``.obj``), only that mesh is rendered.
     """
     ensure_front_preview_dir()
-    OUTPUT_MESHES_DIR = os.path.join(BASE_DIR, "output_meshes")
-    # Render output_meshes first so new generations can be checked immediately
+    # Pre-#27 (kept commented):
+    # OUTPUT_MESHES_DIR = os.path.join(BASE_DIR, "output_meshes")
+    # mesh_files = (
+    #     sorted(glob.glob(os.path.join(OUTPUT_MESHES_DIR, "*.obj"))) +
+    #     sorted(glob.glob(os.path.join(MESHES_DIR, "*.obj")))
+    # )
     mesh_files = (
-        sorted(glob.glob(os.path.join(OUTPUT_MESHES_DIR, "*.obj"))) +
-        sorted(glob.glob(os.path.join(MESHES_DIR, "*.obj")))
+        sorted(glob.glob(os.path.join(PROCEDURAL_MESHES_DIR, "*.obj"))) +
+        sorted(glob.glob(os.path.join(DF3D_MESHES_DIR, "*.obj"))) +
+        sorted(glob.glob(os.path.join(DF3D_MESHES_DIR, "*", "*.obj"))) +
+        ([] if exclude_manual else sorted(glob.glob(os.path.join(MANUAL_MESHES_DIR, "*.obj"))))
     )
     if not mesh_files:
-        print(f"[ERROR] No .obj files found in either {MESHES_DIR} or {OUTPUT_MESHES_DIR}.")
+        print(f"[ERROR] No .obj files found in {MANUAL_MESHES_DIR}, {DF3D_MESHES_DIR}, or {PROCEDURAL_MESHES_DIR}.")
         raise SystemExit(1)
     if only_stem:
         mesh_files = [
@@ -864,7 +884,7 @@ def run_front_mesh_previews(*, only_stem: str | None = None) -> None:
             if os.path.basename(p).replace(".obj", "") == only_stem
         ]
         if not mesh_files:
-            print(f"[ERROR] No mesh matching stem {only_stem!r} in {MESHES_DIR} or {OUTPUT_MESHES_DIR}.")
+            print(f"[ERROR] No mesh matching stem {only_stem!r} in {MANUAL_MESHES_DIR}, {DF3D_MESHES_DIR}, or {PROCEDURAL_MESHES_DIR}.")
             raise SystemExit(1)
 
     prev_w = max(64, _env_int("NECH_PREVIEW_W", 512))

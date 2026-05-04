@@ -132,7 +132,7 @@ Lighting is predicted as 9 SH coefficients. At render time, the user can use the
 │  Stage 0 – Mesh Generation (Blender, headless)                   │
 │  mesh_generator.py                                               │
 │  Drops randomised cloth planes onto collision meshes with         │
-│  physics simulation → output_meshes/*.obj                        │
+│  physics simulation → meshes/procedural/*.obj                    │
 ├──────────────────────────────────────────────────────────────────┤
 │  Stage 1 – PBR Rendering (Mitsuba 3)                             │
 │  generate_dataset.py                                             │
@@ -159,7 +159,7 @@ source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install numpy opencv-python pillow mitsuba
 ```
 
-Place at least one **`.obj`** cloth mesh in `cloth_meshes/` before running the pipeline.
+Place at least one **`.obj`** cloth mesh in `meshes/manual/` before running the pipeline.
 
 ### Optional (better edges / segmentation)
 
@@ -172,8 +172,9 @@ Optional `handwriting.ttf` in the project root improves label rendering; otherwi
 
 | Path | Role |
 |------|------|
-| `cloth_meshes/` | Input `.obj` base/collision meshes (you provide) |
-| `output_meshes/` | Synthetically generated draped cloth meshes (Stage 0 output) |
+| `meshes/manual/` | Hand-sourced `.obj` collision/base meshes — original 6 + TurboSquid additions (committed) |
+| `meshes/df3d/` | DeepFashion3D V2 garments — symlink to local extracted dataset, never committed |
+| `meshes/procedural/` | Stage 0's draped cloth output — regeneratable, gitignored |
 | `mesh_generator.py` | Headless Blender script for physics-based cloth generation |
 | `run_pipeline.sh` | One-command orchestrator that runs all three stages |
 | `cloth_pipeline/` | Library code (dataset render loop, sketch pipeline) |
@@ -211,11 +212,11 @@ Generate physically simulated draped cloth meshes:
 | `--variations` | `5` | Number of unique cloth meshes to generate |
 | `--subdivisions` | `40` | Mesh detail level (higher = more vertices) |
 | `--target_frame` | `100` | Physics simulation length (frames) |
-| `--input_dir` | `cloth_meshes` | Folder containing collision base meshes |
-| `--output_dir` | `output_meshes` | Folder to save generated `.obj` files |
+| `--input_dir` | `meshes/manual` | Folder containing collision base meshes |
+| `--output_dir` | `meshes/procedural` | Folder to save generated draped `.obj` files |
 
 **Randomisation per mesh:**
-- **Base mesh**: Randomly selected from `cloth_meshes/`
+- **Base mesh**: Randomly selected from `meshes/manual/`
 - **Cloth shape**: Square, Rectangle, or Scarf (with optional U-bend for worn scarf look)
 - **Fabric physics**: Thin Scarf, Silk, Cotton, or Denim presets (mass, stiffness, bending)
 - **Drop angle**: Random rotation and tilt before simulation
@@ -227,7 +228,9 @@ Generate physically simulated draped cloth meshes:
 python generate_dataset.py
 ```
 
-Scans **both** `output_meshes/` and `cloth_meshes/` for `.obj` files. New generated meshes are rendered **first** so you can quickly validate them.
+Scans **all three** mesh buckets — `meshes/procedural/`, `meshes/df3d/`, `meshes/manual/` — for `.obj` files. Procedural (Stage 0 output) is rendered **first** so new generations can be checked immediately, then DF3D, then manual.
+
+Pass `--exclude-manual` to skip the `meshes/manual/` bucket — useful once procedural + DF3D coverage is sufficient and you want to drop the original hand-sourced meshes from the dataset.
 
 Default: 3 materials × 2 lightings = **6 renders per mesh**.
 
