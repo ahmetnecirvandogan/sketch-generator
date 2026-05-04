@@ -46,12 +46,12 @@ Runs once, offline.
    │    prompt.txt                │   │                                 │
    │    metadata.json["text"]     │   │                                 │
    └──────────────────────────────┘   └─────────────────────────────────┘
-                  │                             │
-                  ▼                             ▼
-         (no new files —                     sketch.png
-          existing prompt.txt
-          and metadata are
-          updated in place)
+                  │                                   │
+                  --------------------------------------                     
+                                    |
+                                    ▼
+                                sketch.png 
+         
 
    Both branches run on the same per-sample folder. Qwen and Stage 2 are
    independent — neither depends on the other's output.
