@@ -10,13 +10,26 @@
 # Ensure log directory exists
 mkdir -p logs
 
-# Load environment (assumes setup from docs/valar.md)
-cd $WORK/sketch-generator
-conda activate sketchgen
+# 1. Automatically find the project root (where this script lives)
+# This replaces the need for $WORK
+PROJECT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$PROJECT_ROOT"
+echo "Working directory: $(pwd)"
 
-# Ensure VLM dependencies are present for the first run
+# 2. Correct way to activate Conda in a SLURM script
+# We find where conda is installed and source its profile
+CONDA_PATH=$(which conda)
+CONDA_BASE=$(dirname $(dirname $CONDA_PATH))
+source "$CONDA_BASE/etc/profile.d/conda.sh"
+
+# Activate the environment (created in docs/valar.md)
+conda activate sketchgen || { echo "Error: Conda environment 'sketchgen' not found. Create it with 'conda create -n sketchgen python=3.10'"; exit 1; }
+
+# 3. Ensure VLM dependencies are present
+echo "Checking dependencies..."
 pip install -q qwen-vl-utils accelerate
 
+# 4. Run the post-processing script
 echo "Starting Qwen2-VL-7B-Instruct captioning job..."
 python pbr_model/postprocess_df3d_captions.py
 
