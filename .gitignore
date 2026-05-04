@@ -36,3 +36,4 @@ output_meshes/
 # Scratch test files
 test_bake.py
 test_obj.py
+checkpoints/
