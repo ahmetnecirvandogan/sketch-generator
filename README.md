@@ -186,13 +186,14 @@ Optional `handwriting.ttf` in the project root improves label rendering; otherwi
 | `meshes/manual/` | Hand-sourced `.obj` collision/base meshes — original 6 + TurboSquid additions (committed) |
 | `meshes/df3d/` | DeepFashion3D V2 garments — symlink to local extracted dataset, never committed |
 | `meshes/procedural/` | Stage 0's draped cloth output — regeneratable, gitignored |
-| `mesh_generator.py` | Headless Blender script for physics-based cloth generation |
+| `scripts/mesh_generator.py` | Headless Blender script for physics-based cloth generation |
 | `scripts/run_pipeline.sh` | One-command orchestrator that runs all three stages |
 | `scripts/check_env.sh` | Sanity-check Python/Blender/Mitsuba/torch/mesh buckets |
 | `scripts/smoke_test.sh` | End-to-end smoke test on 3+3+3 meshes (one per bucket) |
 | `cloth_pipeline/` | Library code (dataset render loop, sketch pipeline) |
-| `generate_dataset.py` | Stage 1 entry point (Mitsuba rendering) |
-| `generate_sketches.py` | Stage 2 entry point (sketch extraction) |
+| `scripts/generate_dataset.py` | Stage 1 entry point (Mitsuba rendering) |
+| `scripts/generate_sketches.py` | Stage 2 entry point (sketch extraction) |
+| `scripts/generate_augmented_renders.py` | Disconnected — affine augmentation reference (not in pipeline) |
 | `dataset/manual/` | Renders + sketches + maps for manual-bucket meshes (gitignored except README) |
 | `dataset/df3d/` | Renders + sketches + maps for df3d-bucket meshes (gitignored except README) |
 | `dataset/procedural/` | Renders + sketches + maps for procedural-bucket meshes (gitignored except README) |
@@ -218,7 +219,7 @@ This will sequentially execute all three stages:
 Generate physically simulated draped cloth meshes:
 
 ```bash
-/Applications/Blender.app/Contents/MacOS/Blender -b -P mesh_generator.py -- --variations 10
+/Applications/Blender.app/Contents/MacOS/Blender -b -P scripts/mesh_generator.py -- --variations 10
 ```
 
 **CLI flags:**
@@ -240,7 +241,7 @@ Generate physically simulated draped cloth meshes:
 ### Stage 1 — PBR Rendering (Mitsuba 3)
 
 ```bash
-python generate_dataset.py
+python scripts/generate_dataset.py
 ```
 
 Scans **all three** mesh buckets — `meshes/procedural/`, `meshes/df3d/`, `meshes/manual/` — for `.obj` files. Procedural (Stage 0 output) is rendered **first** so new generations can be checked immediately, then DF3D, then manual.
@@ -250,7 +251,7 @@ Pass `--exclude-manual` to skip the `meshes/manual/` bucket — useful once proc
 Default: 3 materials × 2 lightings = **6 renders per mesh**.
 
 ```bash
-python generate_dataset.py --materials-per-mesh 5 --lightings-per-material 3
+python scripts/generate_dataset.py --materials-per-mesh 5 --lightings-per-material 3
 ```
 
 Existing frames are skipped when outputs and metadata already exist (checkpointing).
@@ -264,7 +265,7 @@ Existing frames are skipped when outputs and metadata already exist (checkpointi
 ### Stage 2 — Sketch Extraction
 
 ```bash
-python generate_sketches.py
+python scripts/generate_sketches.py
 ```
 
 Requires `dataset/metadata.jsonl` and the render paths it references (normally after Stage 1). Existing sketches are skipped.
@@ -274,9 +275,9 @@ Requires `dataset/metadata.jsonl` and the render paths it references (normally a
 Texture/pattern strokes are disabled by default to avoid grid artifacts in conditioning sketches.
 
 - Enable with full variable name:
-  - `USE_TEXTURE_STROKES=true python generate_sketches.py`
+  - `USE_TEXTURE_STROKES=true python scripts/generate_sketches.py`
 - Or use the short alias:
-  - `UTS=1 python generate_sketches.py`
+  - `UTS=1 python scripts/generate_sketches.py`
 
 ## Training Data Format
 

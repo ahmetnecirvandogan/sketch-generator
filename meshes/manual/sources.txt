@@ -17,5 +17,11 @@ turbosquid_pants.obj — TurboSquid (TODO: paste URL) — Standard Royalty-Free 
 turbosquid_pencil_skirt.obj — TurboSquid asset 2223920 (women's office classic skirt) — Standard Royalty-Free — 12 MB
 turbosquid_obj.obj — TurboSquid (TODO: paste URL) — Standard Royalty-Free — generic name in source zip; rename if you find a better label
 
-# --- Skipped ---
+# --- Skipped (renamed to .obj.skip so Stage 1's *.obj glob ignores them) ---
+# gabardine.obj.skip — Mitsuba ray tracer segfaulted mid-render in smoke test.
+#   Rendered fine in older runs; possibly mesh+material+lighting interaction.
+#   Re-enable later by renaming back; investigate when time allows.
+# turbosquid_pencil_skirt.obj.skip — Mitsuba refuses to load: "mesh contains
+#   invalid vertex normal data". Re-export from Blender with recomputed
+#   normals to fix.
 # obj_0.obj — 110 MB, exceeds GitHub's 100 MB hard limit; not committed.

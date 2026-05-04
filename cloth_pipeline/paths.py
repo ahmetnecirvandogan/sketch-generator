@@ -57,6 +57,19 @@ def sanitize_mesh_name(stem: str) -> str:
     return s.strip("_")
 
 
+def _mesh_stem_for_dir(mesh_path: str, bucket: str) -> str:
+    """Stem used to build mesh_<stem> dir names. For df3d, all .obj files are
+    named model_cleaned.obj, so use the parent folder (the garment id like
+    1-1, 582-2) instead — otherwise every df3d garment would collapse into a
+    single 'mesh_model_cleaned' directory."""
+    base = os.path.splitext(os.path.basename(mesh_path))[0]
+    if bucket == "df3d":
+        parts = mesh_path.replace("\\", "/").rstrip("/").split("/")
+        if len(parts) >= 2 and parts[-1].startswith("model_cleaned"):
+            return f"df3d_{parts[-2]}"
+    return base
+
+
 def sample_dir_components(
     mesh_path: str,
     material_type: str,
@@ -69,9 +82,10 @@ def sample_dir_components(
     `bucket` is derived from the mesh path so renders are grouped by mesh source
     (manual / df3d / procedural).
     """
-    mesh_stem = os.path.splitext(os.path.basename(mesh_path))[0]
+    bucket = bucket_for_mesh_path(mesh_path)
+    mesh_stem = _mesh_stem_for_dir(mesh_path, bucket)
     return {
-        "bucket": bucket_for_mesh_path(mesh_path),
+        "bucket": bucket,
         "mesh_dir_name": f"mesh_{sanitize_mesh_name(mesh_stem)}",
         "material_pattern_dir_name": (
             f"{sanitize_mesh_name(material_type)}_{sanitize_mesh_name(pattern_name)}"

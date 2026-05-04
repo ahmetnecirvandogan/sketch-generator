@@ -5,6 +5,7 @@
 # 3. Extracts sketches (contours)
 
 set -e # Exit immediately if a command exits with a non-zero status.
+cd "$(dirname "$0")/.."  # always run from repo root
 
 # ---------------------------------------------------------------------------
 # Resolve Blender binary: $BLENDER env var → PATH lookup → macOS default
@@ -28,15 +29,15 @@ echo "================================================="
 echo "   STAGE 0: Mesh Generation (Blender)"
 echo "================================================="
 # Generate 5 variations by default. Change this number as needed.
-"$BLENDER_BIN" -b -P mesh_generator.py -- --variations 5 --subdivisions 40
+"$BLENDER_BIN" -b -P scripts/mesh_generator.py -- --variations 5 --subdivisions 40
 echo "Done generating meshes."
 
 echo ""
 echo "================================================="
 echo "   STAGE 1: Dataset Rendering (Mitsuba)"
 echo "================================================="
-# Renders all .obj files found in cloth_meshes/ and output_meshes/
-python generate_dataset.py
+# Renders all .obj files found in meshes/{manual,df3d,procedural}/
+python scripts/generate_dataset.py
 echo "Done rendering datasets."
 
 echo ""
@@ -44,7 +45,7 @@ echo "================================================="
 echo "   STAGE 2: Sketch Extraction"
 echo "================================================="
 # Processes the Mitsuba outputs into line art
-python generate_sketches.py
+python scripts/generate_sketches.py
 echo "Done extracting sketches."
 
 echo ""

@@ -14,6 +14,11 @@ Outputs land under ``dataset/``; Stage 2 is ``generate_sketches.py``.
 """
 
 import argparse
+import os
+import sys
+
+# scripts/ → repo root on sys.path so `cloth_pipeline` resolves.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cloth_pipeline.rendering import run_front_mesh_previews, run_generation
 

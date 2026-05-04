@@ -31,6 +31,10 @@ import copy
 import json
 import os
 import random
+import sys
+
+# scripts/ → repo root on sys.path so `cloth_pipeline` resolves.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import cv2
 import numpy as np
