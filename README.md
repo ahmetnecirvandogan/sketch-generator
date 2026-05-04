@@ -18,26 +18,43 @@ Runs once, offline.
                     output_meshes/*.obj
                              │
                              ▼
-┌──────────────────────────────────────────────────────────┐
-│  Stage 1 — PBR Rendering (Mitsuba 3)                     │
-│  scene = mesh + material + lighting + camera             │
-└────────────────────────────┬─────────────────────────────┘
-                             │
-                             ▼
-       all outputs below come from one render of the scene
-                             │
-                             ▼
-   render.png  albedo.png  roughness.png  normal.png  mask.png
-   texture.png  depth.npy  normals.npy
-   prompt.txt  metadata.json
-                             │
-                             ▼
-┌──────────────────────────────────────────────────────────┐
-│  Stage 2 — Sketch Extraction                             │
-└────────────────────────────┬─────────────────────────────┘
-                             │
-                             ▼
-                        sketch.png
+┌──────────────────────────────────────────────────────────────────────┐
+│  Stage 1 — PBR Rendering (Mitsuba 3, per sample)                     │
+│  scene = mesh + material/texture + lighting + camera                 │
+│  DF3D: bundled <id>_tex.png used as albedo (no procedural pattern)   │
+└────────────────────────────────┬─────────────────────────────────────┘
+                                 │
+                                 ▼
+                    per sample, all in one folder:
+       render.png  albedo.png  roughness.png  normal.png  mask.png
+       texture.png  depth.npy  normals.npy  prompt.txt  metadata.json
+                                 │
+                  ┌──────────────┴──────────────┐
+                  │                             │
+       (DF3D samples only)               (all samples)
+                  │                             │
+                  ▼                             ▼
+   ┌──────────────────────────────┐   ┌─────────────────────────────────┐
+   │  Qwen2-VL-7B  (FROZEN, GPU)  │   │  Stage 2 — Sketch Extraction    │
+   │                              │   │  (Neçirvan's CV pipeline)       │
+   │  input:  render.png          │   │                                 │
+   │  output: rich visual caption │   │  input:   render.png + masks +  │
+   │          (color, pattern,    │   │           normals + albedo      │
+   │           fabric, lighting,  │   │  output:  sketch.png            │
+   │           view)              │   │                                 │
+   │  rewrites in place:          │   │                                 │
+   │    prompt.txt                │   │                                 │
+   │    metadata.json["text"]     │   │                                 │
+   └──────────────────────────────┘   └─────────────────────────────────┘
+                  │                                   │
+                  --------------------------------------                     
+                                    |
+                                    ▼
+                                sketch.png 
+         
+
+   Both branches run on the same per-sample folder. Qwen and Stage 2 are
+   independent — neither depends on the other's output.
 
    All written into  dataset/<bucket>/<mesh>/<material>_<pattern>/view_<n>/sample_<NNNN>/
                           ↑ bucket = manual / df3d / procedural (auto-derived from mesh source)
@@ -55,22 +72,38 @@ Runs once, offline.
 ### Pipeline 2 — Training
 
 ```
-   VARIANT A — Separated PBR maps          VARIANT B — Combined render
-   (primary)                               (ablation)
+   VARIANT A — Separated PBR maps (primary)         VARIANT B — Combined render (ablation)
 
-          sketch.png + prompt.txt                 sketch.png + prompt.txt
-                     │                                       │
-                     ▼                                       ▼
-   ┌──────────────────────────────────┐    ┌──────────────────────────────────┐
-   │          Neural Network          │    │          Neural Network          │
-   └──────┬─────────┬─────────┬───────┘    └────────────────┬─────────────────┘
-          │         │         │                             │
-          ▼         ▼         ▼                             ▼
-        albedo  roughness  lighting                   render (2D .png)
-                          (9 floats)
+   sketch.png       prompt.txt                      sketch.png       prompt.txt
+   (B,3,512,512)    list[str] len=B                 (B,3,512,512)    list[str] len=B
+        │                 │                                │                 │
+        │                 ▼                                │                 ▼
+        │          ┌─────────────┐                         │          ┌─────────────┐
+        │          │    CLIP     │                         │          │    CLIP     │
+        │          │  (FROZEN)   │                         │          │  (FROZEN)   │
+        │          └──────┬──────┘                         │          └──────┬──────┘
+        │                 │                                │                 │
+        │            text feat (B, 512)                    │            text feat (B, 512)
+        │                 │                                │                 │
+        ▼                 ▼                                ▼                 ▼
+   ┌──────────────────────────────────┐              ┌──────────────────────────────────┐
+   │             U-Net                │              │             U-Net                │
+   │  takes sketch (image input) +    │              │  takes sketch (image input) +    │
+   │  text feat (channel-wise bias    │              │  text feat (channel-wise bias    │
+   │  at bottleneck)  →  predicts maps│              │  at bottleneck)  →  predicts img │
+   │           (TRAINABLE)            │              │           (TRAINABLE)            │
+   └─────┬─────────┬─────────┬────────┘              └─────────────────┬────────────────┘
+         │         │         │                                         │
+         ▼         ▼         ▼                                         ▼
+       albedo   roughness  lighting_sh                              render (.png)
+     (B,3,H,W) (B,1,H,W)  (B, 9 floats)                              (B,3,H,W)
 
-   Loss:  L_albedo + λ₁·L_roughness        Loss:  L_render  (MSE)
-                   + λ₂·L_lighting  (MSE)
+   Loss:  L_albedo + λ₁·L_roughness + λ₂·L_lighting     Loss:  L_render  (MSE)
+                            (all MSE)
+
+   Note: the sketch is an INPUT, never derived from prompt. CLIP only processes
+   the prompt. Both flow into the U-Net at different points (sketch as the image
+   input, text features added as channel-wise bias at the U-Net bottleneck).
 ```
 
 Variants share dataset, loader, and architecture. They differ only in output head and loss target.
@@ -81,42 +114,109 @@ Lighting prediction in Variant A captures Dr. Montazeri's point that sketch high
 
 ### Pipeline 3 — Inference
 
-End-user pipeline.
+End-user pipeline. Two variants — same Trained PBR Model in both, only the mesh source differs. The user's sketch is an INPUT to both the mesh-source path AND the U-Net inside the PBR Model. CLIP only processes the user's prompt; sketch is never derived from prompt.
+
+#### Variant 1 — Gemini + Trellis (external)
 
 ```
-   VARIANT 1 — Gemini + Trellis        VARIANT 2 — Fully in-house
-   (external)
-
-    user sketch + marks + prompt        user sketch + marks + prompt
-                │                                    │
-        ┌───────┴───────┐                   ┌────────┴────────┐
-        ▼               ▼                   ▼                 ▼
-   ┌──────────┐  ┌──────────────┐    ┌────────────┐  ┌─────────────────┐
-   │  Gemini  │  │ Trained PBR  │    │  In-house  │  │   Trained PBR   │
-   │   API    │  │    Model     │    │  sketch →  │  │      Model      │
-   └────┬─────┘  └──────┬───────┘    │    mesh    │  └────────┬────────┘
-        │               │            │  (FUTURE)  │           │
-        ▼               ▼            └─────┬──────┘           ▼
-    2D image     albedo + roughness        │           albedo + roughness
-                        + lighting                             + lighting
-        │               │                  ▼                  │
-        ▼               │                mesh                 │
-   ┌──────────┐         │                  │                  │
-   │ Trellis  │         │                  └─────────┬────────┘
-   └────┬─────┘         │                            ▼
-        │               │                   ┌────────────────┐
-        ▼               │                   │   Compositor   │
-       mesh             │                   └────────┬───────┘
-        │               │                            │
-        └───────┬───────┘                            ▼
-                ▼                                  Scene
-        ┌────────────────┐
-        │   Compositor   │
-        └────────┬───────┘
-                 │
-                 ▼
-               Scene
+                user sketch.png         user prompt
+                     │  │                    │
+                ┌────┘  └─────┐              │
+                │             │              │
+                ▼             │              │
+            ┌──────────┐      │              │
+            │  Gemini  │      │              │
+            │ (FROZEN) │      │              │
+            └────┬─────┘      │              │
+                 ▼            │              │
+             2D image         │              │
+                 │            │              │
+                 ▼            │              │
+            ┌──────────┐      │              │
+            │ Trellis  │      │              │
+            │ (FROZEN) │      │              │
+            └────┬─────┘      │              │
+                 │            │              ▼
+                 ▼            │       ┌─────────────┐
+                mesh          │       │    CLIP     │
+                 │            │       │  (FROZEN)   │
+                 │            │       └──────┬──────┘
+                 │            │              │ text feat (B, 512)
+                 │            ▼              ▼
+                 │       ┌──────────────────────────────┐
+                 │       │           U-Net              │
+                 │       │  takes sketch + text feat →  │
+                 │       │  predicts albedo, roughness, │
+                 │       │  lighting_sh                 │
+                 │       │      (trained weights;       │
+                 │       │       not updated at         │
+                 │       │       inference time)        │
+                 │       └─────┬─────────┬───────┬──────┘
+                 │             ▼         ▼       ▼
+                 │          albedo   roughness  lighting_sh
+                 │             │         │       │
+                 └───────────┐ │         │       │
+                             ▼ ▼         ▼       ▼
+                          ┌──────────────────────────┐
+                          │       Compositor         │
+                          │  combines mesh + maps    │
+                          │  + (predicted or user)   │
+                          │  lighting → final scene  │
+                          └────────────┬─────────────┘
+                                       ▼
+                                     Scene
 ```
+
+#### Variant 2 — Fully in-house
+
+```
+                user sketch.png         user prompt
+                     │  │                    │
+                ┌────┘  └─────┐              │
+                │             │              │
+                ▼             │              │
+         ┌────────────┐       │              │
+         │  In-house  │       │              │
+         │  sketch →  │       │              │
+         │   mesh     │       │              │
+         │  (FUTURE,  │       │              │
+         │  TRAINABLE)│       │              │
+         └─────┬──────┘       │              │
+               │              │              ▼
+               ▼              │       ┌─────────────┐
+              mesh            │       │    CLIP     │
+               │              │       │  (FROZEN)   │
+               │              │       └──────┬──────┘
+               │              │              │ text feat (B, 512)
+               │              ▼              ▼
+               │       ┌──────────────────────────────┐
+               │       │           U-Net              │
+               │       │  takes sketch + text feat →  │
+               │       │  predicts albedo, roughness, │
+               │       │  lighting_sh                 │
+               │       │      (trained weights;       │
+               │       │       not updated at         │
+               │       │       inference time)        │
+               │       └─────┬─────────┬───────┬──────┘
+               │             ▼         ▼       ▼
+               │          albedo   roughness  lighting_sh
+               │             │         │       │
+               └───────────┐ │         │       │
+                           ▼ ▼         ▼       ▼
+                        ┌──────────────────────────┐
+                        │       Compositor         │
+                        │  combines mesh + maps    │
+                        │  + (predicted or user)   │
+                        │  lighting → final scene  │
+                        └────────────┬─────────────┘
+                                     ▼
+                                   Scene
+```
+
+**Notes that apply to both variants:**
+- The **sketch is an input** drawn by the user; it is *never* derived from the prompt. It feeds two paths in parallel: the mesh-source pipeline (Gemini→Trellis or in-house sketch→mesh), AND the U-Net inside the Trained PBR Model.
+- **CLIP only processes the prompt.** It produces a 512-dim text feature that gets injected at the U-Net's bottleneck. Same frozen CLIP weights as during training.
+- **Qwen does NOT run at inference.** It was a training-data preprocessing step (Pipeline 1). Once the model is trained, only CLIP + U-Net are needed.
 
 **Comparison**
 - **Variant 1**: external dependency (Gemini, Trellis).
