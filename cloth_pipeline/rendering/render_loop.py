@@ -842,6 +842,21 @@ def run_generation(
         #   • mesh_transform    – 4×4 matrix that was applied to the .obj mesh,
         #                         so the geometry branch can reproduce the pose
         # -----------------------------------------------------------------------
+        # Preservation of high-quality VLM captions from Stage 3 (Issue #38)
+        meta_path = os.path.join(sample_out_dir, "metadata.json")
+        vlm_data = {}
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, 'r') as f:
+                    old_meta = json.load(f)
+                    if "vlm_caption" in old_meta:
+                        vlm_data["vlm_caption"] = old_meta["vlm_caption"]
+                        vlm_data["vlm_caption_at"] = old_meta.get("vlm_caption_at")
+                        # Prepend the VLM caption to the prompt
+                        prompt = f"{vlm_data['vlm_caption']}. {prompt}"
+            except Exception:
+                pass
+
         rec = {
             "frame":              frame_str,
             "file_name":          os.path.relpath(render_path, BASE_DIR),
@@ -873,12 +888,12 @@ def run_generation(
             "material_type":      material_desc,
             "material_props": {
                 "roughness":   round(roughness,   4),
-                "specular":    round(specular,     4),
-                "sheen":       round(sheen,        4),
-                "sheen_tint":  round(sheen_tint,   4),
-                "anisotropic": round(anisotropic,  4),
-                "spec_trans":  round(spec_trans,   4),
-                "clearcoat":   round(clearcoat,    4),
+                "specular":    round(specular,    4),
+                "sheen":       round(sheen,       4),
+                "sheen_tint":  round(sheen_tint,  4),
+                "anisotropic": round(anisotropic, 4),
+                "spec_trans":  round(spec_trans,  4),
+                "clearcoat":   round(clearcoat,   4),
             },
             # ── Procedural albedo map (surface pattern, not BRDF material) ──
             "pattern_name":       pattern_name,
@@ -902,6 +917,9 @@ def run_generation(
                 os.path.join(sample_out_dir, "sketch.png"), BASE_DIR
             ),
         }
+        
+        # Merge preserved VLM data if it exists
+        rec.update(vlm_data)
         metadata_records.append(rec)
 
         # ---- Save per-sample prompt and metadata ----
