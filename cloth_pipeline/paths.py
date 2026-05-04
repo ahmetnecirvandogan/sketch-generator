@@ -49,6 +49,78 @@ def bucket_for_mesh_path(mesh_path: str) -> str:
     return "unknown"
 
 
+# ---------------------------------------------------------------------------
+# DF3D-specific helpers (issue #36 — bundled-texture passthrough)
+# ---------------------------------------------------------------------------
+
+
+def _df3d_garment_id(mesh_path: str) -> str | None:
+    """For meshes/df3d/.../<id>/model_cleaned.obj, return '<id>' (e.g. '1-1', '582-2').
+
+    Returns None if the mesh isn't from the df3d bucket or doesn't follow the
+    DF3D V2 layout (per-garment subfolder containing model_cleaned.obj)."""
+    if bucket_for_mesh_path(mesh_path) != "df3d":
+        return None
+    parts = mesh_path.replace("\\", "/").rstrip("/").split("/")
+    if len(parts) < 2:
+        return None
+    if not parts[-1].startswith("model_cleaned"):
+        return None
+    return parts[-2]
+
+
+def df3d_bundled_texture(mesh_path: str) -> str | None:
+    """Path to DF3D's photogrammetry-baked albedo (``<id>_tex.png``) sitting next
+    to the .obj. Returns None if the mesh isn't from df3d or the texture isn't
+    on disk."""
+    garment_id = _df3d_garment_id(mesh_path)
+    if garment_id is None:
+        return None
+    tex_path = os.path.join(os.path.dirname(mesh_path), f"{garment_id}_tex.png")
+    return tex_path if os.path.exists(tex_path) else None
+
+
+_DF3D_CATEGORY_CACHE: dict[int, str] | None = None
+
+
+def df3d_garment_category(mesh_path: str) -> str | None:
+    """Look up DF3D garment category from ``meshes/df3d/garment_type_list.txt``.
+
+    DF3D garment ids are like ``1-1`` (base id 1, variant 1); the category file
+    keys by base id. Returns names like ``'long_sleeve_dress'``, or None if the
+    file isn't present / id isn't found."""
+    global _DF3D_CATEGORY_CACHE
+    garment_id = _df3d_garment_id(mesh_path)
+    if garment_id is None:
+        return None
+    base_id_str = garment_id.split("-")[0]
+    try:
+        base_id = int(base_id_str)
+    except ValueError:
+        return None
+
+    if _DF3D_CATEGORY_CACHE is None:
+        list_path = os.path.join(BASE_DIR, "meshes", "df3d", "garment_type_list.txt")
+        if not os.path.exists(list_path):
+            _DF3D_CATEGORY_CACHE = {}
+        else:
+            cache: dict[int, str] = {}
+            with open(list_path) as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if not parts:
+                        continue
+                    cat, ids = parts[0], parts[1:]
+                    for idstr in ids:
+                        try:
+                            cache[int(idstr)] = cat
+                        except ValueError:
+                            continue
+            _DF3D_CATEGORY_CACHE = cache
+
+    return _DF3D_CATEGORY_CACHE.get(base_id)
+
+
 def sanitize_mesh_name(stem: str) -> str:
     """Lowercase + collapse non-alphanumeric runs to underscores; strip edges.
     Generic enough to use for any path component (mesh, material, pattern)."""
