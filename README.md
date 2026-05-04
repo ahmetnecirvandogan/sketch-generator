@@ -95,7 +95,7 @@ Runs once, offline.
    └─────┬─────────┬─────────┬────────┘              └─────────────────┬────────────────┘
          │         │         │                                         │
          ▼         ▼         ▼                                         ▼
-       albedo   roughness  lighting_sh                              render
+       albedo   roughness  lighting_sh                              render (.png)
      (B,3,H,W) (B,1,H,W)  (B, 9 floats)                          (B,3,H,W)
 
    Loss:  L_albedo + λ₁·L_roughness + λ₂·L_lighting     Loss:  L_render  (MSE)
