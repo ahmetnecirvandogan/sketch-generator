@@ -53,7 +53,7 @@ def postprocess_df3d_captions(batch_size=1):
                     "role": "user",
                     "content": [
                         {"type": "image", "image": render_path},
-                        {"type": "text", "text": "Describe this 3D garment render in detail. Focus on the fabric type, lighting, creases, fabric folds, and the overall silhouette. Be concise but descriptive for a text-to-image model."},
+                        {"type": "text", "text": "Describe this 3D garment in detail. Focus ONLY on the garment's shape, silhouette, fabric texture, and specific patterns or graphics. Do NOT mention lighting, shadows, or highlights. Be concise but descriptive for a text-to-image model."},
                     ],
                 }
             ]
