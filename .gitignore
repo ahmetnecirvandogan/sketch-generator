@@ -35,9 +35,10 @@ ENV/
 # meshes/procedural/ — Stage 0's draped output, regeneratable, not committed
 meshes/procedural/*
 !meshes/procedural/.gitkeep
-# meshes/df3d/ — DeepFashion3D V2, large + academic-license, never pushed
-meshes/df3d/*
-!meshes/df3d/.gitkeep
+# meshes/df3d/ — DeepFashion3D V2, large + academic-license, never pushed.
+# Locally this is a symlink to your extracted DF3D dataset; ignored entirely.
+meshes/df3d
+meshes/df3d/
 
 # Pre-#27 layout (kept commented for reference until everyone has migrated)
 # output_meshes/
