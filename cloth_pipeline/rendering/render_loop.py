@@ -23,6 +23,9 @@ from cloth_pipeline.paths import (
     MESHES_DIR,  # backward-compat alias = MANUAL_MESHES_DIR (issue #27)
     METADATA_PATH,
     DATASET_DIR,
+    bucket_for_mesh_path,
+    df3d_bundled_texture,
+    df3d_garment_category,
     ensure_dataset_stage_dirs,
     ensure_front_preview_dir,
     output_sample_dir,
@@ -476,24 +479,38 @@ def run_generation(
                 lo, hi = _p[key]
                 return random.uniform(lo, hi)
 
-            img, pattern_name, pattern_params = generate_random_albedo_map()
-
-            uv_u_range, uv_v_range = 1.0, 1.0
-            try:
-                with open(current_mesh_path) as _mf:
-                    _us, _vs = [], []
-                    for _line in _mf:
-                        if _line.startswith('vt '):
-                            _parts = _line.split()
-                            _us.append(float(_parts[1]))
-                            _vs.append(float(_parts[2]))
-                    if _us:
-                        uv_u_range = max(_us) - min(_us)
-                        uv_v_range = max(_vs) - min(_vs)
-            except Exception:
-                pass
-
-            desired_repeats = random.uniform(3.0, 6.0)
+            # Issue #36 — DF3D bundled-texture passthrough.
+            # For meshes from meshes/df3d/, use the photogrammetry-baked texture
+            # shipped alongside the mesh (.../<garment-id>/<garment-id>_tex.png)
+            # instead of generating a random procedural pattern. Roughness, lighting
+            # and camera stay random per sample (those are scene parameters, not
+            # mesh-bundled).
+            df3d_tex = df3d_bundled_texture(current_mesh_path)
+            if df3d_tex is not None:
+                img = None
+                pattern_name = "photogrammetry"
+                pattern_params = {"source": "df3d_bundled", "tex_path": df3d_tex}
+                # No tiling — bundled texture is UV-mapped 1:1 to the mesh.
+                tile_u = tile_v = 1.0
+            else:
+                img, pattern_name, pattern_params = generate_random_albedo_map()
+                uv_u_range, uv_v_range = 1.0, 1.0
+                try:
+                    with open(current_mesh_path) as _mf:
+                        _us, _vs = [], []
+                        for _line in _mf:
+                            if _line.startswith('vt '):
+                                _parts = _line.split()
+                                _us.append(float(_parts[1]))
+                                _vs.append(float(_parts[2]))
+                        if _us:
+                            uv_u_range = max(_us) - min(_us)
+                            uv_v_range = max(_vs) - min(_vs)
+                except Exception:
+                    pass
+                desired_repeats = random.uniform(3.0, 6.0)
+                tile_u = desired_repeats / max(uv_u_range, 0.01)
+                tile_v = desired_repeats / max(uv_v_range, 0.01)
 
             material_pattern_cache[cache_key] = {
                 'material_desc':   material_desc,
@@ -507,8 +524,9 @@ def run_generation(
                 'img':             img,
                 'pattern_name':    pattern_name,
                 'pattern_params':  pattern_params,
-                'tile_u':          desired_repeats / max(uv_u_range, 0.01),
-                'tile_v':          desired_repeats / max(uv_v_range, 0.01),
+                'tile_u':          tile_u,
+                'tile_v':          tile_v,
+                'tex_path':        df3d_tex,  # absolute path to bundled tex; None for non-df3d
             }
 
         mp = material_pattern_cache[cache_key]
@@ -530,22 +548,55 @@ def run_generation(
         tile_v          = mp['tile_v']
 
         # --- DYNAMIC PROMPT ---
-        obj_name = _clean_mesh_name(mesh_name)
-        keyword  = f"{material_desc} {obj_name}"
-        prompt = (
-            f"a photorealistic 3D render of a {material_desc} {obj_name} with "
-            f"{pattern_name} pattern, physical rendering, detailed fabric folds"
-        )
+        # For DF3D meshes: use the garment category (e.g. "long-sleeve dress")
+        # from garment_type_list.txt and drop the procedural-pattern boilerplate
+        # (no random pattern was applied — bundled photogrammetry texture is used).
+        # For other buckets: original template with mesh-name + material + pattern.
+        bucket_name = bucket_for_mesh_path(current_mesh_path)
+        if bucket_name == "df3d":
+            # We do NOT know the actual fabric material of a DF3D scan — the visible
+            # albedo is whatever was photographed. The `material_desc` we sampled was
+            # only to roll random BRDF parameters (roughness/sheen). Putting it in the
+            # prompt would lie to the network ("silk" with a wool-looking scan), so we
+            # drop it. We DO keep what's truthful: the garment category (from
+            # garment_type_list.txt), the rolled surface response, and the
+            # photogrammetry origin.
+            cat = df3d_garment_category(current_mesh_path)
+            cat_phrase = cat.replace("_", " ") if cat else "garment"
+            rough_desc_p = "matte" if roughness > 0.5 else "smooth" if roughness > 0.2 else "glossy"
+            sheen_desc_p = "with a velvety sheen" if sheen > 0.6 else "with subtle highlights"
+            obj_name = cat_phrase
+            keyword  = cat_phrase
+            prompt = (
+                f"a photorealistic 3D render of a real {cat_phrase}, "
+                f"{rough_desc_p} {sheen_desc_p}, photogrammetry-scanned fabric, "
+                f"detailed folds and drape"
+            )
+        else:
+            obj_name = _clean_mesh_name(mesh_name)
+            keyword  = f"{material_desc} {obj_name}"
+            prompt = (
+                f"a photorealistic 3D render of a {material_desc} {obj_name} with "
+                f"{pattern_name} pattern, physical rendering, detailed fabric folds"
+            )
 
         # --- TEXTURE-FOCUSED PROMPT (for prompt.txt only) ---
         rough_desc = "matte surface" if roughness > 0.5 else "smooth finish" if roughness > 0.2 else "glossy finish"
         sheen_desc = "with a soft velvety sheen" if sheen > 0.6 else "with subtle highlights"
-        texture_prompt = (
-            f"{material_desc} fabric texture, {pattern_name} pattern, "
-            f"a high-detail 3D render of {material_desc} fabric surface, "
-            f"featuring a {pattern_name} pattern, {rough_desc}, {sheen_desc}, "
-            f"micro-texture surface detail, realistic cloth folds"
-        )
+        if bucket_name == "df3d":
+            # No procedural pattern, no random material claim — only what we know.
+            texture_prompt = (
+                f"real photogrammetry albedo, photogrammetry-scanned fabric surface, "
+                f"a high-detail 3D render, {rough_desc}, {sheen_desc}, "
+                f"micro-texture surface detail, realistic cloth folds"
+            )
+        else:
+            texture_prompt = (
+                f"{material_desc} fabric texture, {pattern_name} pattern, "
+                f"a high-detail 3D render of {material_desc} fabric surface, "
+                f"featuring a {pattern_name} pattern, {rough_desc}, {sheen_desc}, "
+                f"micro-texture surface detail, realistic cloth folds"
+            )
 
         view_idx = 0
         frame_id = i
@@ -559,11 +610,12 @@ def run_generation(
         
         # Save texture in the sample folder
         tex_path = os.path.join(sample_out_dir, "texture.png")
-        if 'img' in mp:
+        if mp.get('img') is not None:
+            # Procedural path — save the generated PIL image.
             mp['img'].save(tex_path)
-        else:
-            # From metadata, copy if it doesn't exist
-            if 'tex_path' in mp and mp['tex_path'] and not os.path.exists(tex_path) and mp['tex_path'] != tex_path:
+        elif mp.get('tex_path'):
+            # DF3D / metadata-restore path — copy the bundled (or cached) texture in.
+            if not os.path.exists(tex_path) and os.path.abspath(mp['tex_path']) != os.path.abspath(tex_path):
                 import shutil
                 shutil.copy2(mp['tex_path'], tex_path)
         
@@ -781,7 +833,14 @@ def run_generation(
             "depth_image":        os.path.relpath(depth_path, BASE_DIR),
             "normals_image":      os.path.relpath(normals_path, BASE_DIR),
             "mask_image":         os.path.relpath(mask_path, BASE_DIR),
-            "text":               f"{obj_name}, {material_desc} material, {prompt}",
+            "text":               (
+                # DF3D: don't prepend the random material_desc — we don't know the
+                # actual fabric of the photogrammetry scan. The `prompt` already
+                # carries the truthful pieces (category + rolled BRDF descriptors).
+                f"{obj_name}, {prompt}"
+                if bucket_name == "df3d"
+                else f"{obj_name}, {material_desc} material, {prompt}"
+            ),
             "keyword":             keyword,
             "mesh_file":          os.path.relpath(current_mesh_path, BASE_DIR),
             # ── Camera parameters (Neural Contours Geometry Branch) ──
