@@ -67,3 +67,4 @@ meshes/procedural/*
 # Scratch test files
 test_bake.py
 test_obj.py
+checkpoints/
