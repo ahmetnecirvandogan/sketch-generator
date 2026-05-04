@@ -39,7 +39,8 @@ Runs once, offline.
                              ▼
                         sketch.png
 
-   All written into  dataset/<mesh>/<material>_<pattern>/view_<n>/sample_<NNNN>/
+   All written into  dataset/<bucket>/<mesh>/<material>_<pattern>/view_<n>/sample_<NNNN>/
+                          ↑ bucket = manual / df3d / procedural (auto-derived from mesh source)
 ```
 
 
@@ -138,12 +139,12 @@ Lighting is predicted as 9 SH coefficients. At render time, the user can use the
 │  generate_dataset.py                                             │
 │  Builds a scene per sample (mesh + random material + lighting    │
 │  + camera) and renders it, writing every AOV in one pass          │
-│  → dataset/<mesh>/<material>/view_0/sample_N/                    │
+│  → dataset/<bucket>/<mesh>/<material>/view_0/sample_N/          │
 ├──────────────────────────────────────────────────────────────────┤
 │  Stage 2 – Sketch Extraction                                     │
 │  generate_sketches.py                                            │
 │  Processes renders into line-art conditioning images              │
-│  → dataset/<mesh>/<material>/view_0/sample_N/sketch.png          │
+│  → dataset/<bucket>/<mesh>/<material>/view_0/sample_N/sketch.png │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -192,8 +193,10 @@ Optional `handwriting.ttf` in the project root improves label rendering; otherwi
 | `cloth_pipeline/` | Library code (dataset render loop, sketch pipeline) |
 | `generate_dataset.py` | Stage 1 entry point (Mitsuba rendering) |
 | `generate_sketches.py` | Stage 2 entry point (sketch extraction) |
-| `dataset/` | All per-sample generated data (renders, depth, normals, sketch, etc) |
-| `dataset/metadata.jsonl` | One JSON object per frame (lighting, material, text prompt, paths, …) |
+| `dataset/manual/` | Renders + sketches + maps for manual-bucket meshes (gitignored except README) |
+| `dataset/df3d/` | Renders + sketches + maps for df3d-bucket meshes (gitignored except README) |
+| `dataset/procedural/` | Renders + sketches + maps for procedural-bucket meshes (gitignored except README) |
+| `dataset/metadata.jsonl` | One JSON object per frame (lighting, material, text prompt, paths, …); gitignored |
 
 ## Usage
 

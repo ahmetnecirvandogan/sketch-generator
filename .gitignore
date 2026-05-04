@@ -1,5 +1,22 @@
-# Generated dataset artifacts (root-level only)
-/dataset/
+# Generated dataset artifacts (per-bucket layout, issue #27).
+# Bucket folders + their READMEs stay tracked so the structure is visible
+# on github; everything else inside is regeneratable and gitignored.
+/dataset/metadata.jsonl
+/dataset/front_previews/
+/dataset/manual/*
+!/dataset/manual/README.md
+/dataset/df3d/*
+!/dataset/df3d/README.md
+/dataset/procedural/*
+!/dataset/procedural/README.md
+# Pre-#27 flat layout (in case any of these still exist locally from old runs)
+/dataset/depth/
+/dataset/masks/
+/dataset/normals/
+/dataset/renders/
+/dataset/textures/
+/dataset/conditioning/
+/dataset/outputs/
 
 # Generated PBR output maps
 outputs/

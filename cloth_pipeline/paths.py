@@ -21,10 +21,32 @@ DATASET_DIR = os.path.join(BASE_DIR, "dataset")
 METADATA_PATH = os.path.join(DATASET_DIR, "metadata.jsonl")
 FRONT_PREVIEW_DIR = os.path.join(DATASET_DIR, "front_previews")
 
-# Training-ready outputs (sketch + PBR maps), grouped per mesh / view.
-# Stage 1 writes albedo/normal/roughness here; Stage 2 writes sketch here.
-# Layout: dataset/mesh_<sanitized_stem>/view_<idx>/{sketch,albedo,normal,roughness}.png
+# Per-bucket dataset roots (issue #27 — group renders by mesh source so you
+# can compare manual vs df3d vs procedural at a glance).
+DATASET_MANUAL_DIR = os.path.join(DATASET_DIR, "manual")
+DATASET_DF3D_DIR = os.path.join(DATASET_DIR, "df3d")
+DATASET_PROCEDURAL_DIR = os.path.join(DATASET_DIR, "procedural")
 
+# Training-ready outputs (sketch + PBR maps), grouped per bucket / mesh / view.
+# Stage 1 writes albedo/normal/roughness here; Stage 2 writes sketch here.
+# Layout: dataset/<bucket>/mesh_<stem>/<mat>_<pat>/view_<idx>/sample_<NNNN>/...
+
+
+_BUCKET_PATTERNS = (
+    ("manual", os.path.join("meshes", "manual")),
+    ("df3d", os.path.join("meshes", "df3d")),
+    ("procedural", os.path.join("meshes", "procedural")),
+)
+
+
+def bucket_for_mesh_path(mesh_path: str) -> str:
+    """Infer which mesh bucket a path came from. Returns 'manual', 'df3d',
+    'procedural', or 'unknown' (for paths outside the project layout)."""
+    mp = mesh_path.replace("\\", "/")
+    for name, segment in _BUCKET_PATTERNS:
+        if segment.replace("\\", "/") in mp:
+            return name
+    return "unknown"
 
 
 def sanitize_mesh_name(stem: str) -> str:
@@ -42,9 +64,14 @@ def sample_dir_components(
     view_idx: int,
     frame_id: int,
 ) -> dict:
-    """Named pieces of the per-sample output directory; mirror these into metadata."""
+    """Named pieces of the per-sample output directory; mirror these into metadata.
+
+    `bucket` is derived from the mesh path so renders are grouped by mesh source
+    (manual / df3d / procedural).
+    """
     mesh_stem = os.path.splitext(os.path.basename(mesh_path))[0]
     return {
+        "bucket": bucket_for_mesh_path(mesh_path),
         "mesh_dir_name": f"mesh_{sanitize_mesh_name(mesh_stem)}",
         "material_pattern_dir_name": (
             f"{sanitize_mesh_name(material_type)}_{sanitize_mesh_name(pattern_name)}"
@@ -61,10 +88,11 @@ def output_sample_dir(
     view_idx: int,
     frame_id: int,
 ) -> str:
-    """Absolute path to the per-(mesh, material+pattern, view, frame) directory."""
+    """Absolute path to the per-(bucket, mesh, material+pattern, view, frame) directory."""
     parts = sample_dir_components(mesh_path, material_type, pattern_name, view_idx, frame_id)
     return os.path.join(
         DATASET_DIR,
+        parts["bucket"],
         parts["mesh_dir_name"],
         parts["material_pattern_dir_name"],
         f"view_{parts['view_idx']}",
@@ -73,9 +101,12 @@ def output_sample_dir(
 
 
 def ensure_dataset_stage_dirs() -> None:
-    """Create flat intermediate dirs + the dataset/ root (per-mesh subdirs are
-    created on demand at write time)."""
-    for d in (MANUAL_MESHES_DIR, DF3D_MESHES_DIR, PROCEDURAL_MESHES_DIR, DATASET_DIR):
+    """Create the input mesh buckets + per-bucket dataset roots."""
+    for d in (
+        MANUAL_MESHES_DIR, DF3D_MESHES_DIR, PROCEDURAL_MESHES_DIR,
+        DATASET_DIR,
+        DATASET_MANUAL_DIR, DATASET_DF3D_DIR, DATASET_PROCEDURAL_DIR,
+    ):
         os.makedirs(d, exist_ok=True)
 
 
