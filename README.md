@@ -39,7 +39,8 @@ Runs once, offline.
                              ▼
                         sketch.png
 
-   All written into  dataset/<mesh>/<material>_<pattern>/view_<n>/sample_<NNNN>/
+   All written into  dataset/<bucket>/<mesh>/<material>_<pattern>/view_<n>/sample_<NNNN>/
+                          ↑ bucket = manual / df3d / procedural (auto-derived from mesh source)
 ```
 
 
@@ -132,18 +133,18 @@ Lighting is predicted as 9 SH coefficients. At render time, the user can use the
 │  Stage 0 – Mesh Generation (Blender, headless)                   │
 │  mesh_generator.py                                               │
 │  Drops randomised cloth planes onto collision meshes with         │
-│  physics simulation → output_meshes/*.obj                        │
+│  physics simulation → meshes/procedural/*.obj                    │
 ├──────────────────────────────────────────────────────────────────┤
 │  Stage 1 – PBR Rendering (Mitsuba 3)                             │
 │  generate_dataset.py                                             │
 │  Builds a scene per sample (mesh + random material + lighting    │
 │  + camera) and renders it, writing every AOV in one pass          │
-│  → dataset/<mesh>/<material>/view_0/sample_N/                    │
+│  → dataset/<bucket>/<mesh>/<material>/view_0/sample_N/          │
 ├──────────────────────────────────────────────────────────────────┤
 │  Stage 2 – Sketch Extraction                                     │
 │  generate_sketches.py                                            │
 │  Processes renders into line-art conditioning images              │
-│  → dataset/<mesh>/<material>/view_0/sample_N/sketch.png          │
+│  → dataset/<bucket>/<mesh>/<material>/view_0/sample_N/sketch.png │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -159,7 +160,17 @@ source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install numpy opencv-python pillow mitsuba
 ```
 
-Place at least one **`.obj`** cloth mesh in `cloth_meshes/` before running the pipeline.
+Place at least one **`.obj`** cloth mesh in `meshes/manual/` before running the pipeline.
+
+### Optional — DeepFashion3D V2 dataset (`meshes/df3d/`)
+
+DF3D V2 is a large academic dataset (~3.6 GB, ~590 garment scans) under a research-only license that forbids redistribution. It is therefore **never committed** to this repository. To use it locally, request access at https://github.com/GAP-LAB-CUHK-SZ/deepFashion3D, extract `filtered_registered_mesh.rar`, and symlink the extracted folder into `meshes/df3d/`:
+
+```bash
+ln -s /absolute/path/to/your/extracted/filtered_registered_mesh meshes/df3d
+```
+
+Stage 1 will pick up DF3D garments automatically (the renderer scans `meshes/df3d/*/*.obj` recursively). The symlink is gitignored.
 
 ### Optional (better edges / segmentation)
 
@@ -172,15 +183,21 @@ Optional `handwriting.ttf` in the project root improves label rendering; otherwi
 
 | Path | Role |
 |------|------|
-| `cloth_meshes/` | Input `.obj` base/collision meshes (you provide) |
-| `output_meshes/` | Synthetically generated draped cloth meshes (Stage 0 output) |
-| `mesh_generator.py` | Headless Blender script for physics-based cloth generation |
-| `run_pipeline.sh` | One-command orchestrator that runs all three stages |
+| `meshes/manual/` | Hand-sourced `.obj` collision/base meshes — original 6 + TurboSquid additions (committed) |
+| `meshes/df3d/` | DeepFashion3D V2 garments — symlink to local extracted dataset, never committed |
+| `meshes/procedural/` | Stage 0's draped cloth output — regeneratable, gitignored |
+| `scripts/mesh_generator.py` | Headless Blender script for physics-based cloth generation |
+| `scripts/run_pipeline.sh` | One-command orchestrator that runs all three stages |
+| `scripts/check_env.sh` | Sanity-check Python/Blender/Mitsuba/torch/mesh buckets |
+| `scripts/smoke_test.sh` | End-to-end smoke test on 3+3+3 meshes (one per bucket) |
 | `cloth_pipeline/` | Library code (dataset render loop, sketch pipeline) |
-| `generate_dataset.py` | Stage 1 entry point (Mitsuba rendering) |
-| `generate_sketches.py` | Stage 2 entry point (sketch extraction) |
-| `dataset/` | All per-sample generated data (renders, depth, normals, sketch, etc) |
-| `dataset/metadata.jsonl` | One JSON object per frame (lighting, material, text prompt, paths, …) |
+| `scripts/generate_dataset.py` | Stage 1 entry point (Mitsuba rendering) |
+| `scripts/generate_sketches.py` | Stage 2 entry point (sketch extraction) |
+| `scripts/generate_augmented_renders.py` | Disconnected — affine augmentation reference (not in pipeline) |
+| `dataset/manual/` | Renders + sketches + maps for manual-bucket meshes (gitignored except README) |
+| `dataset/df3d/` | Renders + sketches + maps for df3d-bucket meshes (gitignored except README) |
+| `dataset/procedural/` | Renders + sketches + maps for procedural-bucket meshes (gitignored except README) |
+| `dataset/metadata.jsonl` | One JSON object per frame (lighting, material, text prompt, paths, …); gitignored |
 
 ## Usage
 
@@ -189,7 +206,7 @@ Optional `handwriting.ttf` in the project root improves label rendering; otherwi
 From the **repository root**, run the full pipeline with a single command:
 
 ```bash
-./run_pipeline.sh
+./scripts/run_pipeline.sh
 ```
 
 This will sequentially execute all three stages:
@@ -202,7 +219,7 @@ This will sequentially execute all three stages:
 Generate physically simulated draped cloth meshes:
 
 ```bash
-/Applications/Blender.app/Contents/MacOS/Blender -b -P mesh_generator.py -- --variations 10
+/Applications/Blender.app/Contents/MacOS/Blender -b -P scripts/mesh_generator.py -- --variations 10
 ```
 
 **CLI flags:**
@@ -211,11 +228,11 @@ Generate physically simulated draped cloth meshes:
 | `--variations` | `5` | Number of unique cloth meshes to generate |
 | `--subdivisions` | `40` | Mesh detail level (higher = more vertices) |
 | `--target_frame` | `100` | Physics simulation length (frames) |
-| `--input_dir` | `cloth_meshes` | Folder containing collision base meshes |
-| `--output_dir` | `output_meshes` | Folder to save generated `.obj` files |
+| `--input_dir` | `meshes/manual` | Folder containing collision base meshes |
+| `--output_dir` | `meshes/procedural` | Folder to save generated draped `.obj` files |
 
 **Randomisation per mesh:**
-- **Base mesh**: Randomly selected from `cloth_meshes/`
+- **Base mesh**: Randomly selected from `meshes/manual/`
 - **Cloth shape**: Square, Rectangle, or Scarf (with optional U-bend for worn scarf look)
 - **Fabric physics**: Thin Scarf, Silk, Cotton, or Denim presets (mass, stiffness, bending)
 - **Drop angle**: Random rotation and tilt before simulation
@@ -224,15 +241,17 @@ Generate physically simulated draped cloth meshes:
 ### Stage 1 — PBR Rendering (Mitsuba 3)
 
 ```bash
-python generate_dataset.py
+python scripts/generate_dataset.py
 ```
 
-Scans **both** `output_meshes/` and `cloth_meshes/` for `.obj` files. New generated meshes are rendered **first** so you can quickly validate them.
+Scans **all three** mesh buckets — `meshes/procedural/`, `meshes/df3d/`, `meshes/manual/` — for `.obj` files. Procedural (Stage 0 output) is rendered **first** so new generations can be checked immediately, then DF3D, then manual.
+
+Pass `--exclude-manual` to skip the `meshes/manual/` bucket — useful once procedural + DF3D coverage is sufficient and you want to drop the original hand-sourced meshes from the dataset.
 
 Default: 3 materials × 2 lightings = **6 renders per mesh**.
 
 ```bash
-python generate_dataset.py --materials-per-mesh 5 --lightings-per-material 3
+python scripts/generate_dataset.py --materials-per-mesh 5 --lightings-per-material 3
 ```
 
 Existing frames are skipped when outputs and metadata already exist (checkpointing).
@@ -246,7 +265,7 @@ Existing frames are skipped when outputs and metadata already exist (checkpointi
 ### Stage 2 — Sketch Extraction
 
 ```bash
-python generate_sketches.py
+python scripts/generate_sketches.py
 ```
 
 Requires `dataset/metadata.jsonl` and the render paths it references (normally after Stage 1). Existing sketches are skipped.
@@ -256,9 +275,9 @@ Requires `dataset/metadata.jsonl` and the render paths it references (normally a
 Texture/pattern strokes are disabled by default to avoid grid artifacts in conditioning sketches.
 
 - Enable with full variable name:
-  - `USE_TEXTURE_STROKES=true python generate_sketches.py`
+  - `USE_TEXTURE_STROKES=true python scripts/generate_sketches.py`
 - Or use the short alias:
-  - `UTS=1 python generate_sketches.py`
+  - `UTS=1 python scripts/generate_sketches.py`
 
 ## Training Data Format
 

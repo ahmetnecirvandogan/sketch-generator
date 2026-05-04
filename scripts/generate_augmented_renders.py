@@ -1,6 +1,15 @@
 """
 generate_augmented_renders.py
 ------------------------------
+NOT USED CURRENTLY — disconnected from the pipeline. No file in the repo
+imports or invokes this script, and `scripts/run_pipeline.sh` does not
+reference it. Kept here as a working reference implementation of 2-D
+affine-augmentation logic for future use (additional dataset variants
+without re-rendering).
+
+Re-enable by adding a step to `scripts/run_pipeline.sh` after Stage 1:
+    python generate_augmented_renders.py --augments N --seed S
+
 Produce augmented variants of existing renders by applying 2-D affine
 transforms (rotation + translation) consistently across:
   • render PNG  (BGRA, background stays gray)
@@ -22,6 +31,10 @@ import copy
 import json
 import os
 import random
+import sys
+
+# scripts/ → repo root on sys.path so `cloth_pipeline` resolves.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import cv2
 import numpy as np

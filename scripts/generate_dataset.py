@@ -14,6 +14,11 @@ Outputs land under ``dataset/``; Stage 2 is ``generate_sketches.py``.
 """
 
 import argparse
+import os
+import sys
+
+# scripts/ → repo root on sys.path so `cloth_pipeline` resolves.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cloth_pipeline.rendering import run_front_mesh_previews, run_generation
 
@@ -44,11 +49,36 @@ if __name__ == "__main__":
         metavar="N",
         help="Number of lighting variations per (mesh, material, pattern) (default: 2).",
     )
+    parser.add_argument(
+        "--exclude-manual",
+        action="store_true",
+        help=(
+            "Skip the meshes/manual/ bucket in Stage 1's scan. Useful once procedural + df3d "
+            "coverage is sufficient and the original hand-sourced meshes are no longer needed. "
+            "Default behavior (without this flag) renders all three buckets (manual + df3d + procedural)."
+        ),
+    )
+    parser.add_argument(
+        "--max-per-bucket",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Cap each bucket (manual, df3d, procedural) at the first N meshes. Useful for smoke "
+            "tests on a small representative subset. Default: no cap (all meshes)."
+        ),
+    )
     args = parser.parse_args()
     if args.front_previews:
-        run_front_mesh_previews(only_stem=args.front_preview_only)
+        run_front_mesh_previews(
+            only_stem=args.front_preview_only,
+            exclude_manual=args.exclude_manual,
+            max_per_bucket=args.max_per_bucket,
+        )
     else:
         run_generation(
             materials_per_mesh=args.materials_per_mesh,
             lightings_per_material=args.lightings_per_material,
+            exclude_manual=args.exclude_manual,
+            max_per_bucket=args.max_per_bucket,
         )

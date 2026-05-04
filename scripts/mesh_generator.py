@@ -16,8 +16,11 @@ def get_args():
     
     parser = argparse.ArgumentParser(description="Generate draped cloth meshes.")
     parser.add_argument("--variations", type=int, default=5, help="Number of variations to generate")
-    parser.add_argument("--input_dir", type=str, default="cloth_meshes", help="Directory with base collision meshes")
-    parser.add_argument("--output_dir", type=str, default="output_meshes", help="Directory to save generated .obj files")
+    # Pre-#27 defaults (kept commented; superseded by the meshes/{manual,procedural} layout)
+    # parser.add_argument("--input_dir", type=str, default="cloth_meshes", help="Directory with base collision meshes")
+    # parser.add_argument("--output_dir", type=str, default="output_meshes", help="Directory to save generated .obj files")
+    parser.add_argument("--input_dir", type=str, default="meshes/manual", help="Directory with base collision meshes")
+    parser.add_argument("--output_dir", type=str, default="meshes/procedural", help="Directory to save generated .obj files")
     parser.add_argument("--subdivisions", type=int, default=50, help="Subdivisions for cloth plane")
     parser.add_argument("--target_frame", type=int, default=100, help="Frame to freeze the simulation at")
     return parser.parse_args(argv)

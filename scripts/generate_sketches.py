@@ -12,6 +12,12 @@ shadows, features, drawing, batch runner). Run from project root:
 See module docstrings there for HED/SAM optional models and env vars.
 """
 
+import os
+import sys
+
+# scripts/ → repo root on sys.path so `cloth_pipeline` resolves.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from cloth_pipeline.sketch import run_from_metadata
 
 if __name__ == "__main__":
