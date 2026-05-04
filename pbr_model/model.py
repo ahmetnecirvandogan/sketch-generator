@@ -99,13 +99,14 @@ class TextEncoder(nn.Module):
     """Toy text encoder: hash each prompt → vocab id → learned embedding → linear.
 
     Deterministic enough for scaffold smoke tests; *not* what real training will use.
-    Swap with a real text encoder (CLIP, T5, frozen BERT, etc.) — only requirement
-    is output shape ``(B, embed_dim)``.
+    Swap with ``CLIPTextEncoder`` (or another real encoder) for real training —
+    only requirement is output shape ``(B, embed_dim)``.
     """
 
     def __init__(self, embed_dim: int = 128, vocab_size: int = 10_000) -> None:
         super().__init__()
         self.vocab_size = vocab_size
+        self.embed_dim = embed_dim
         self.emb = nn.Embedding(vocab_size, embed_dim)
         self.proj = nn.Linear(embed_dim, embed_dim)
 
@@ -122,6 +123,59 @@ class TextEncoder(nn.Module):
         )
         embs = self.emb(ids).mean(dim=1)  # (B, D)
         return F.relu(self.proj(embs))
+
+
+class CLIPTextEncoder(nn.Module):
+    """Frozen CLIP text encoder for real training (issue #32).
+
+    Wraps ``transformers.CLIPTextModel`` + ``CLIPTokenizer``. Pretrained on
+    400M (image, text) pairs, so prompts like "houndstooth pattern", "silk",
+    "draped" already carry visually-grounded meaning before our network ever
+    starts training.
+
+    - First call downloads ~250 MB to ``~/.cache/huggingface/`` (offline thereafter).
+    - Frozen — no gradient flows into CLIP. It's a fixed feature extractor.
+    - Output shape: ``(B, embed_dim)`` where embed_dim = 512 for ViT-B/32.
+
+    Drop-in replacement for ``TextEncoder``: same forward signature ``(list[str]) → (B, D)``.
+    """
+
+    def __init__(self, model_name: str = "openai/clip-vit-base-patch32") -> None:
+        super().__init__()
+        try:
+            from transformers import CLIPTextModel, CLIPTokenizer
+        except ImportError as e:
+            raise ImportError(
+                "CLIPTextEncoder requires the `transformers` package. "
+                "Install with: python3 -m pip install transformers"
+            ) from e
+        self.tokenizer = CLIPTokenizer.from_pretrained(model_name)
+        self.text_model = CLIPTextModel.from_pretrained(model_name)
+        # Freeze: no gradient through CLIP at training time.
+        for p in self.text_model.parameters():
+            p.requires_grad = False
+        self.text_model.eval()
+        self.embed_dim = self.text_model.config.hidden_size  # 512 for ViT-B/32
+
+    def forward(self, prompts: list[str]) -> torch.Tensor:
+        device = next(self.text_model.parameters()).device
+        tokens = self.tokenizer(
+            prompts,
+            padding=True,
+            truncation=True,
+            max_length=77,  # CLIP's standard context length
+            return_tensors="pt",
+        ).to(device)
+        with torch.no_grad():  # belt-and-suspenders: requires_grad already False
+            out = self.text_model(**tokens)
+        # ``pooler_output`` is the EOT-token embedding — CLIP's standard sentence vector.
+        return out.pooler_output  # (B, embed_dim)
+
+    def train(self, mode: bool = True) -> "CLIPTextEncoder":
+        # Override: keep CLIP in eval mode regardless of parent module's train()/eval().
+        super().train(mode)
+        self.text_model.eval()
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -143,6 +197,8 @@ class PBRModel(nn.Module):
         variant: Literal["a", "b"] = "a",
         base_channels: int = 32,
         text_dim: int = 128,
+        use_clip: bool = False,
+        clip_model: str = "openai/clip-vit-base-patch32",
     ) -> None:
         super().__init__()
         if variant not in ("a", "b"):
@@ -158,7 +214,14 @@ class PBRModel(nn.Module):
         self.down4 = Down(c * 8, c * 16)       # bottleneck (B, 16c, H/16, W/16)
 
         # --- Text injection at the bottleneck ---
-        self.text_enc = TextEncoder(embed_dim=text_dim)
+        # use_clip=True: frozen CLIP text encoder (real training).
+        # use_clip=False: the toy stub encoder (scaffold smoke tests).
+        if use_clip:
+            self.text_enc = CLIPTextEncoder(model_name=clip_model)
+            text_dim = self.text_enc.embed_dim  # 512 for ViT-B/32
+        else:
+            self.text_enc = TextEncoder(embed_dim=text_dim)
+        self.use_clip = use_clip
         self.text_proj = nn.Linear(text_dim, c * 16)
 
         # --- Decoder ---
@@ -223,9 +286,22 @@ def make_model(
     variant: Literal["a", "b"] = "a",
     base_channels: int = 32,
     text_dim: int = 128,
+    use_clip: bool = False,
+    clip_model: str = "openai/clip-vit-base-patch32",
 ) -> PBRModel:
-    """Factory for ``PBRModel``. Mirrors ``pbr_model.dataset.make_dataloader``."""
-    return PBRModel(variant=variant, base_channels=base_channels, text_dim=text_dim)
+    """Factory for ``PBRModel``. Mirrors ``pbr_model.dataset.make_dataloader``.
+
+    ``use_clip=True`` swaps the toy stub text encoder for a frozen CLIP encoder.
+    Default is ``False`` so scaffold smoke tests stay fast and don't require
+    the ~250 MB CLIP download.
+    """
+    return PBRModel(
+        variant=variant,
+        base_channels=base_channels,
+        text_dim=text_dim,
+        use_clip=use_clip,
+        clip_model=clip_model,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -235,9 +311,18 @@ def make_model(
 
 def _smoke_test(args: argparse.Namespace) -> None:
     torch.manual_seed(0)
-    model = make_model(variant=args.variant, base_channels=args.base_channels)
+    model = make_model(
+        variant=args.variant,
+        base_channels=args.base_channels,
+        use_clip=args.use_clip,
+    )
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"PBRModel(variant={args.variant!r}, base_channels={args.base_channels}) | {n_params:,} params")
+    n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    text_kind = "CLIP" if args.use_clip else "stub"
+    print(
+        f"PBRModel(variant={args.variant!r}, base_channels={args.base_channels}, "
+        f"text={text_kind}) | {n_params:,} params total, {n_train:,} trainable"
+    )
 
     sketch = torch.randn(args.batch_size, 3, args.size, args.size)
     prompts = [f"cloth sample {i}" for i in range(args.batch_size)]
@@ -257,6 +342,10 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--size", type=int, default=512, help="square input H=W")
     parser.add_argument("--base-channels", type=int, default=32)
+    parser.add_argument(
+        "--use-clip", action="store_true",
+        help="Use frozen CLIP text encoder instead of the toy stub. Downloads ~250 MB on first call.",
+    )
     args = parser.parse_args()
     _smoke_test(args)
 
