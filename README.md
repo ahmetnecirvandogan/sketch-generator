@@ -161,6 +161,16 @@ pip install numpy opencv-python pillow mitsuba
 
 Place at least one **`.obj`** cloth mesh in `meshes/manual/` before running the pipeline.
 
+### Optional — DeepFashion3D V2 dataset (`meshes/df3d/`)
+
+DF3D V2 is a large academic dataset (~3.6 GB, ~590 garment scans) under a research-only license that forbids redistribution. It is therefore **never committed** to this repository. To use it locally, request access at https://github.com/GAP-LAB-CUHK-SZ/deepFashion3D, extract `filtered_registered_mesh.rar`, and symlink the extracted folder into `meshes/df3d/`:
+
+```bash
+ln -s /absolute/path/to/your/extracted/filtered_registered_mesh meshes/df3d
+```
+
+Stage 1 will pick up DF3D garments automatically (the renderer scans `meshes/df3d/*/*.obj` recursively). The symlink is gitignored.
+
 ### Optional (better edges / segmentation)
 
 - **HED:** `deploy.prototxt` and `hed_pretrained_bsds.caffemodel` in the project root, or set `HED_MODEL_DIR` to the folder that contains them. Without these, the pipeline uses bilateral Canny edges.
