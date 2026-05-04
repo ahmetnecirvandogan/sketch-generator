@@ -186,7 +186,9 @@ Optional `handwriting.ttf` in the project root improves label rendering; otherwi
 | `meshes/df3d/` | DeepFashion3D V2 garments — symlink to local extracted dataset, never committed |
 | `meshes/procedural/` | Stage 0's draped cloth output — regeneratable, gitignored |
 | `mesh_generator.py` | Headless Blender script for physics-based cloth generation |
-| `run_pipeline.sh` | One-command orchestrator that runs all three stages |
+| `scripts/run_pipeline.sh` | One-command orchestrator that runs all three stages |
+| `scripts/check_env.sh` | Sanity-check Python/Blender/Mitsuba/torch/mesh buckets |
+| `scripts/smoke_test.sh` | End-to-end smoke test on 3+3+3 meshes (one per bucket) |
 | `cloth_pipeline/` | Library code (dataset render loop, sketch pipeline) |
 | `generate_dataset.py` | Stage 1 entry point (Mitsuba rendering) |
 | `generate_sketches.py` | Stage 2 entry point (sketch extraction) |
@@ -200,7 +202,7 @@ Optional `handwriting.ttf` in the project root improves label rendering; otherwi
 From the **repository root**, run the full pipeline with a single command:
 
 ```bash
-./run_pipeline.sh
+./scripts/run_pipeline.sh
 ```
 
 This will sequentially execute all three stages:

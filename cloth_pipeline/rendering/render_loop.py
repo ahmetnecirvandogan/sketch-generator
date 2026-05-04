@@ -137,6 +137,7 @@ def run_generation(
     materials_per_mesh: int = 3,
     lightings_per_material: int = 2,
     exclude_manual: bool = False,
+    max_per_bucket: int | None = None,
 ) -> None:
     """Three-level deterministic loop: mesh × (material+pattern) × lighting.
 
@@ -163,6 +164,10 @@ def run_generation(
     df3d_mesh_files = sorted(glob.glob(os.path.join(DF3D_MESHES_DIR, "*.obj")))
     df3d_mesh_files += sorted(glob.glob(os.path.join(DF3D_MESHES_DIR, "*", "*.obj")))
     manual_mesh_files = [] if exclude_manual else sorted(glob.glob(os.path.join(MANUAL_MESHES_DIR, "*.obj")))
+    if max_per_bucket is not None and max_per_bucket > 0:
+        procedural_mesh_files = procedural_mesh_files[:max_per_bucket]
+        df3d_mesh_files = df3d_mesh_files[:max_per_bucket]
+        manual_mesh_files = manual_mesh_files[:max_per_bucket]
     mesh_files = procedural_mesh_files + df3d_mesh_files + manual_mesh_files
 
     print("--- PATH DIAGNOSTICS ---")
@@ -853,7 +858,7 @@ def run_generation(
     print("\nNext: run  python generate_sketches.py  to write sketch.png next to PBR maps.")
 
 
-def run_front_mesh_previews(*, only_stem: str | None = None, exclude_manual: bool = False) -> None:
+def run_front_mesh_previews(*, only_stem: str | None = None, exclude_manual: bool = False, max_per_bucket: int | None = None) -> None:
     """
     One neutral render per mesh under dataset/front_previews/ using the same fixed
     front camera as the main dataset (identity mesh pose). For quick visual check
@@ -868,12 +873,14 @@ def run_front_mesh_previews(*, only_stem: str | None = None, exclude_manual: boo
     #     sorted(glob.glob(os.path.join(OUTPUT_MESHES_DIR, "*.obj"))) +
     #     sorted(glob.glob(os.path.join(MESHES_DIR, "*.obj")))
     # )
-    mesh_files = (
-        sorted(glob.glob(os.path.join(PROCEDURAL_MESHES_DIR, "*.obj"))) +
-        sorted(glob.glob(os.path.join(DF3D_MESHES_DIR, "*.obj"))) +
-        sorted(glob.glob(os.path.join(DF3D_MESHES_DIR, "*", "*.obj"))) +
-        ([] if exclude_manual else sorted(glob.glob(os.path.join(MANUAL_MESHES_DIR, "*.obj"))))
-    )
+    proc_files = sorted(glob.glob(os.path.join(PROCEDURAL_MESHES_DIR, "*.obj")))
+    df3d_files = sorted(glob.glob(os.path.join(DF3D_MESHES_DIR, "*.obj"))) + sorted(glob.glob(os.path.join(DF3D_MESHES_DIR, "*", "*.obj")))
+    manual_files = [] if exclude_manual else sorted(glob.glob(os.path.join(MANUAL_MESHES_DIR, "*.obj")))
+    if max_per_bucket is not None and max_per_bucket > 0:
+        proc_files = proc_files[:max_per_bucket]
+        df3d_files = df3d_files[:max_per_bucket]
+        manual_files = manual_files[:max_per_bucket]
+    mesh_files = proc_files + df3d_files + manual_files
     if not mesh_files:
         print(f"[ERROR] No .obj files found in {MANUAL_MESHES_DIR}, {DF3D_MESHES_DIR}, or {PROCEDURAL_MESHES_DIR}.")
         raise SystemExit(1)

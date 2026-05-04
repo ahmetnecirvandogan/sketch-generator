@@ -53,15 +53,27 @@ if __name__ == "__main__":
             "Default behavior (without this flag) renders all three buckets (manual + df3d + procedural)."
         ),
     )
+    parser.add_argument(
+        "--max-per-bucket",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Cap each bucket (manual, df3d, procedural) at the first N meshes. Useful for smoke "
+            "tests on a small representative subset. Default: no cap (all meshes)."
+        ),
+    )
     args = parser.parse_args()
     if args.front_previews:
         run_front_mesh_previews(
             only_stem=args.front_preview_only,
             exclude_manual=args.exclude_manual,
+            max_per_bucket=args.max_per_bucket,
         )
     else:
         run_generation(
             materials_per_mesh=args.materials_per_mesh,
             lightings_per_material=args.lightings_per_material,
             exclude_manual=args.exclude_manual,
+            max_per_bucket=args.max_per_bucket,
         )
