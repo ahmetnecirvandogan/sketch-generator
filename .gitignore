@@ -30,6 +30,9 @@ ENV/
 .idea/
 .vscode/
 
+# Claude Code local state (per-user, machine-specific)
+.claude/
+
 # Mesh buckets (issue #27)
 # meshes/manual/ stays tracked (hand-sourced .obj files committed to repo)
 # meshes/procedural/ — Stage 0's draped output, regeneratable, never pushed.
