@@ -49,11 +49,11 @@ python3 scripts/generate_dataset.py \
 echo
 
 # Stage 2: extract sketches from the renders.
-# USE_TEXTURE_STROKES=true draws pattern strokes into the sketch (default off
-# in the regular pipeline; enabled here so smoke-test sketches encode pattern
-# info too — useful for visual comparison across material/pattern combos).
-echo "--- Stage 2: extracting sketches (with pattern strokes enabled) ---"
-USE_TEXTURE_STROKES=true python3 scripts/generate_sketches.py
+# Uses the default sketch algorithm (no pattern strokes) — matches what
+# Neçirvan ships. To preview pattern strokes, run manually with
+# USE_TEXTURE_STROKES=true.
+echo "--- Stage 2: extracting sketches ---"
+python3 scripts/generate_sketches.py
 echo
 
 # Optional preprocessing: project lighting to SH coefficients (9 floats per sample).
