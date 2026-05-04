@@ -84,6 +84,7 @@ def train(
     steps: int = 10,
     lr: float = 1e-3,
     base_channels: int = 16,
+    use_clip: bool = False,
     lambda_roughness: float = 1.0,
     lambda_lighting: float = 0.1,
     checkpoint_path: str | Path = "checkpoints/scaffold.pt",
@@ -92,12 +93,16 @@ def train(
 ) -> dict:
     """Run a tiny training loop. Returns a dict with first/last loss + checkpoint path."""
     if verbose:
-        print(f"=== training scaffold | variant={variant} | bs={batch_size} | steps={steps} | device={device} ===")
+        text_kind = "CLIP" if use_clip else "stub"
+        print(
+            f"=== training scaffold | variant={variant} | bs={batch_size} | steps={steps} "
+            f"| text={text_kind} | device={device} ==="
+        )
 
     loader = make_dataloader(
         metadata_path=metadata_path, variant=variant, batch_size=batch_size, shuffle=True,
     )
-    model = make_model(variant=variant, base_channels=base_channels).to(device)
+    model = make_model(variant=variant, base_channels=base_channels, use_clip=use_clip).to(device)
     model.train()
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
@@ -178,6 +183,10 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=10)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--base-channels", type=int, default=16)
+    parser.add_argument(
+        "--use-clip", action="store_true",
+        help="Use frozen CLIP text encoder instead of the stub (real-training quality, ~250 MB download).",
+    )
     parser.add_argument("--lambda-roughness", type=float, default=1.0)
     parser.add_argument("--lambda-lighting", type=float, default=0.1)
     parser.add_argument("--checkpoint", default="checkpoints/scaffold.pt")
@@ -191,6 +200,7 @@ def main() -> None:
         steps=args.steps,
         lr=args.lr,
         base_channels=args.base_channels,
+        use_clip=args.use_clip,
         lambda_roughness=args.lambda_roughness,
         lambda_lighting=args.lambda_lighting,
         checkpoint_path=args.checkpoint,
