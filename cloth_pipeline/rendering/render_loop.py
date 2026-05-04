@@ -161,8 +161,8 @@ def run_generation(
     # New three-bucket scan (issue #27): procedural (Stage 0 output) first so new
     # generations can be checked immediately, then df3d, then manual.
     procedural_mesh_files = sorted(glob.glob(os.path.join(PROCEDURAL_MESHES_DIR, "*.obj")))
-    df3d_mesh_files = sorted(glob.glob(os.path.join(DF3D_MESHES_DIR, "*.obj")))
-    df3d_mesh_files += sorted(glob.glob(os.path.join(DF3D_MESHES_DIR, "*", "*.obj")))
+    # df3d uses recursive glob so symlinks at any depth (e.g. meshes/df3d/all/<id>/model_cleaned.obj) work.
+    df3d_mesh_files = sorted(glob.glob(os.path.join(DF3D_MESHES_DIR, "**", "*.obj"), recursive=True))
     manual_mesh_files = [] if exclude_manual else sorted(glob.glob(os.path.join(MANUAL_MESHES_DIR, "*.obj")))
     if max_per_bucket is not None and max_per_bucket > 0:
         procedural_mesh_files = procedural_mesh_files[:max_per_bucket]
@@ -874,7 +874,8 @@ def run_front_mesh_previews(*, only_stem: str | None = None, exclude_manual: boo
     #     sorted(glob.glob(os.path.join(MESHES_DIR, "*.obj")))
     # )
     proc_files = sorted(glob.glob(os.path.join(PROCEDURAL_MESHES_DIR, "*.obj")))
-    df3d_files = sorted(glob.glob(os.path.join(DF3D_MESHES_DIR, "*.obj"))) + sorted(glob.glob(os.path.join(DF3D_MESHES_DIR, "*", "*.obj")))
+    # Recursive glob for df3d (handles meshes/df3d/all/<id>/model_cleaned.obj layout)
+    df3d_files = sorted(glob.glob(os.path.join(DF3D_MESHES_DIR, "**", "*.obj"), recursive=True))
     manual_files = [] if exclude_manual else sorted(glob.glob(os.path.join(MANUAL_MESHES_DIR, "*.obj")))
     if max_per_bucket is not None and max_per_bucket > 0:
         proc_files = proc_files[:max_per_bucket]

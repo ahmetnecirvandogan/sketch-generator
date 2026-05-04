@@ -34,14 +34,13 @@ ENV/
 .claude/
 
 # Mesh buckets (issue #27)
-# meshes/manual/ stays tracked (hand-sourced .obj files committed to repo)
-# meshes/procedural/ — Stage 0's draped output, regeneratable, never pushed.
-# Folder is created on demand by ensure_dataset_stage_dirs() at runtime.
-meshes/procedural/
-# meshes/df3d/ — DeepFashion3D V2, large + academic-license, never pushed.
-# Locally this is a symlink to your extracted DF3D dataset; ignored entirely.
-meshes/df3d
-meshes/df3d/
+# Folders themselves stay tracked (each holds a README.md so the structure
+# is visible on github). Contents are gitignored.
+# manual/ stays fully tracked (committed .obj files).
+meshes/df3d/*
+!meshes/df3d/README.md
+meshes/procedural/*
+!meshes/procedural/README.md
 
 # Pre-#27 layout (kept commented for reference until everyone has migrated)
 # output_meshes/
