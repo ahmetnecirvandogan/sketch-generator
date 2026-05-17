@@ -65,7 +65,7 @@ def setup_simulation(input_dir, base_mesh_file, output_dir, subdivisions, target
     # We leave scaling as is, assuming cloth_meshes/ are properly scaled.
     
     # Apply Collision modifier
-    bpy.ops.object.modifier_add(type='COLLISION')
+    base_obj.modifiers.new(name="Collision", type='COLLISION')
     
     # 3. Create Cloth Plane
     # Spawn it above the collision mesh. The exact height might depend on the base mesh scale.
