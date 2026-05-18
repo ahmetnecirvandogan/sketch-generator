@@ -66,11 +66,13 @@ def _load_model(device: str):
     print(f"[qwen] loading {model_id} on {device}...")
     processor = AutoProcessor.from_pretrained(model_id)
     dtype = torch.bfloat16 if device == "cuda" else torch.float32
+    # Avoid device_map (needs `accelerate`); do .to(device) explicitly so the
+    # script works with a minimal transformers + torch install.
     model = Qwen2VLForConditionalGeneration.from_pretrained(
         model_id,
         torch_dtype=dtype,
-        device_map=device,
     )
+    model = model.to(device)
     model.eval()
     return processor, model
 
