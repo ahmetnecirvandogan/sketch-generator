@@ -262,6 +262,8 @@ Existing frames are skipped when outputs and metadata already exist (checkpointi
 - Binary cloth mask
 - PBR ground truth maps (albedo, normal, roughness)
 
+**DF3D rendering notes (Methods).** DF3D textures contain photogrammetry-rig lighting baked into the pixel values. Stage 1 boosts Mitsuba environment + key-light intensity by **2×** for the DF3D bucket so scene lighting dominates the baked layer (~75–85 % of the appearance from Mitsuba, ~15–25 % from baked). This keeps the `lighting_sh` head's supervision signal usable; predicted albedo retains a small bounded low-frequency offset from the baked layer. The principled cleanup (texture delighting or joint-learning reconstruction loss à la Wu et al. CVPR 2020) is tracked in issue #50 and is required for clean relighting demos.
+
 ### Stage 2 — Sketch Extraction
 
 ```bash

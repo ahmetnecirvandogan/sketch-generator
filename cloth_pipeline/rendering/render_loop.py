@@ -313,6 +313,14 @@ def run_generation(
             current_mesh_path = mesh_files[mesh_idx]
         mesh_name = os.path.basename(current_mesh_path).replace(".obj", "")
 
+        # Issue #49: DF3D textures contain photogrammetry-rig lighting baked into
+        # the pixel values. Boost Mitsuba intensity so scene lighting dominates the
+        # baked layer (~2x baseline range). Bounded supervision mismatch only;
+        # principled cleanup tracked in #50.
+        df3d_lighting_boost = (
+            2.0 if bucket_for_mesh_path(current_mesh_path) == "df3d" else 1.0
+        )
+
         # Calculate bounding box for this specific mesh to frame it correctly
         loaded_shape = mi.load_dict({'type': 'obj', 'filename': current_mesh_path})
         bbox    = loaded_shape.bbox()
@@ -367,10 +375,12 @@ def run_generation(
         dx, dy, dz = float(_dir[0]), float(_dir[1]), float(_dir[2])
 
         # Stronger neutral fill so fabrics (especially dark/rough) stay readable.
-        env_scale = random.uniform(0.45, 0.75)
+        # For DF3D, boost both env + key by df3d_lighting_boost (#49) so Mitsuba
+        # dominates the baked photogrammetry layer in the texture.
+        env_scale = random.uniform(0.45, 0.75) * df3d_lighting_boost
         base_env_rgb = [env_scale, env_scale, env_scale]
 
-        key_irr = random.uniform(4.5, 9.0)
+        key_irr = random.uniform(4.5, 9.0) * df3d_lighting_boost
         base_key_rgb = [tint_key[j] * key_irr for j in range(3)]
 
         lights_meta = [
