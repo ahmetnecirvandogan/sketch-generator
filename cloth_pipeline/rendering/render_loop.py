@@ -212,12 +212,27 @@ def run_generation(
 
     # Load existing metadata so we preserve it when skipping frames
     existing_metadata = {}
+    
+    # 1. Reconstruct from individual folders (handles job interruptions)
+    print("Scanning dataset directories for existing frames to reconstruct checkpoint...")
+    for root, _, files in os.walk(DATASET_DIR):
+        if "metadata.json" in files:
+            try:
+                with open(os.path.join(root, "metadata.json")) as f:
+                    rec = json.load(f)
+                    if "frame" in rec:
+                        existing_metadata[rec["frame"]] = rec
+            except Exception:
+                pass
+                
+    # 2. Also load from metadata.jsonl just in case (and to override if it exists)
     if os.path.exists(METADATA_PATH):
         with open(METADATA_PATH) as f:
             for ln in f:
                 if ln.strip():
                     rec = json.loads(ln)
-                    existing_metadata[rec["frame"]] = rec
+                    if "frame" in rec:
+                        existing_metadata[rec["frame"]] = rec
 
     # Pre-populate the material+pattern cache from existing metadata so that a
     # mid-run restart (e.g. after a Mitsuba segfault) reuses the SAME material
