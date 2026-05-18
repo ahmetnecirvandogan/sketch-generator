@@ -21,6 +21,7 @@ CLI smoke test::
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -31,6 +32,31 @@ import numpy as np
 import torch
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
+
+
+Split = Literal["train", "val", "test", "all"]
+
+
+def _mesh_split_assignment(
+    mesh_id: str,
+    val_fraction: float,
+    test_fraction: float,
+    seed: int,
+) -> Split:
+    """Deterministic mesh → split. Stable across runs for a given seed.
+
+    Holds out whole meshes (issue #43): the network never sees any sample
+    from a held-out mesh during training. Random per-sample splits would
+    leak — same garment under different lighting/camera would appear in
+    both train and val.
+    """
+    h = hashlib.md5(f"{mesh_id}:{seed}".encode()).hexdigest()
+    fraction = int(h[:8], 16) / 0xFFFFFFFF
+    if fraction < val_fraction:
+        return "val"
+    if fraction < val_fraction + test_fraction:
+        return "test"
+    return "train"
 
 
 def _load_rgb(path: Path) -> torch.Tensor:
@@ -73,10 +99,22 @@ class ClothDataset(Dataset):
         metadata_path: str | Path = "dataset/metadata.jsonl",
         variant: Literal["a", "b"] = "a",
         repo_root: str | Path | None = None,
+        split: Split = "all",
+        val_fraction: float = 0.1,
+        test_fraction: float = 0.1,
+        split_seed: int = 42,
     ) -> None:
         if variant not in ("a", "b"):
             raise ValueError(f"variant must be 'a' or 'b', got {variant!r}")
+        if split not in ("train", "val", "test", "all"):
+            raise ValueError(f"split must be train/val/test/all, got {split!r}")
+        if val_fraction < 0 or test_fraction < 0 or val_fraction + test_fraction >= 1.0:
+            raise ValueError(
+                f"val_fraction={val_fraction} + test_fraction={test_fraction} "
+                "must be in [0, 1) and sum to < 1.0"
+            )
         self.variant: Literal["a", "b"] = variant
+        self.split: Split = split
 
         mp = Path(metadata_path)
         self.metadata_path = mp if mp.is_absolute() else (Path.cwd() / mp).resolve()
@@ -94,9 +132,31 @@ class ClothDataset(Dataset):
             self.repo_root = Path.cwd()
 
         with open(self.metadata_path) as f:
-            self.samples = [json.loads(line) for line in f if line.strip()]
-        if not self.samples:
+            all_samples = [json.loads(line) for line in f if line.strip()]
+        if not all_samples:
             raise RuntimeError(f"no samples in {self.metadata_path}")
+
+        # Split filtering (issue #43): hold out whole meshes, not random samples.
+        # Identifier = "mesh_file" (the .obj path relative to repo root).
+        if split == "all":
+            self.samples = all_samples
+        else:
+            self.samples = [
+                s for s in all_samples
+                if _mesh_split_assignment(
+                    s.get("mesh_file", s.get("frame", "")),
+                    val_fraction,
+                    test_fraction,
+                    split_seed,
+                ) == split
+            ]
+        if not self.samples:
+            raise RuntimeError(
+                f"split={split!r} has no samples — {len(all_samples)} total samples "
+                f"in metadata, but none assigned to this split with "
+                f"val_fraction={val_fraction}, test_fraction={test_fraction}, "
+                f"split_seed={split_seed}"
+            )
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -164,13 +224,29 @@ def make_dataloader(
     shuffle: bool = True,
     num_workers: int = 0,
     repo_root: str | Path | None = None,
+    split: Split = "all",
+    val_fraction: float = 0.1,
+    test_fraction: float = 0.1,
+    split_seed: int = 42,
 ) -> DataLoader:
     """Factory: builds ``ClothDataset`` and wraps it in a ``DataLoader``.
 
     ``batch_size=4`` is a placeholder for the scaffold; tune it once #20 (model)
     and #21 (training loop) land and we know GPU memory headroom.
+
+    Issue #43: pass ``split="train" | "val" | "test"`` to hold out whole meshes
+    deterministically. Use the same ``split_seed`` across train/val loaders for
+    a non-overlapping mesh-id partition.
     """
-    ds = ClothDataset(metadata_path=metadata_path, variant=variant, repo_root=repo_root)
+    ds = ClothDataset(
+        metadata_path=metadata_path,
+        variant=variant,
+        repo_root=repo_root,
+        split=split,
+        val_fraction=val_fraction,
+        test_fraction=test_fraction,
+        split_seed=split_seed,
+    )
     return DataLoader(
         ds,
         batch_size=batch_size,
@@ -187,10 +263,14 @@ def _smoke_test(args: argparse.Namespace) -> None:
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=0,
+        split=args.split,
+        val_fraction=args.val_fraction,
+        test_fraction=args.test_fraction,
+        split_seed=args.split_seed,
     )
     print(
         f"dataset: {len(loader.dataset)} samples | variant: {args.variant} | "
-        f"batch_size: {args.batch_size}"
+        f"split: {args.split} | batch_size: {args.batch_size}"
     )
     batch = next(iter(loader))
     print("first batch:")
@@ -199,6 +279,35 @@ def _smoke_test(args: argparse.Namespace) -> None:
             print(f"  {k:>12}: {tuple(v.shape)} {v.dtype}")
         else:
             print(f"  {k:>12}: list[{type(v[0]).__name__}] len={len(v)}")
+
+    if args.verify_split:
+        # Sanity check: assert train/val/test mesh sets are disjoint with the same seed.
+        train_ds = ClothDataset(
+            metadata_path=args.metadata, variant=args.variant, split="train",
+            val_fraction=args.val_fraction, test_fraction=args.test_fraction,
+            split_seed=args.split_seed,
+        )
+        val_ds = ClothDataset(
+            metadata_path=args.metadata, variant=args.variant, split="val",
+            val_fraction=args.val_fraction, test_fraction=args.test_fraction,
+            split_seed=args.split_seed,
+        )
+        test_ds = ClothDataset(
+            metadata_path=args.metadata, variant=args.variant, split="test",
+            val_fraction=args.val_fraction, test_fraction=args.test_fraction,
+            split_seed=args.split_seed,
+        )
+        train_meshes = {s.get("mesh_file", "") for s in train_ds.samples}
+        val_meshes = {s.get("mesh_file", "") for s in val_ds.samples}
+        test_meshes = {s.get("mesh_file", "") for s in test_ds.samples}
+        assert not (train_meshes & val_meshes), "train ∩ val is non-empty"
+        assert not (train_meshes & test_meshes), "train ∩ test is non-empty"
+        assert not (val_meshes & test_meshes), "val ∩ test is non-empty"
+        print(
+            f"split sanity: train={len(train_meshes)} meshes / {len(train_ds)} samples, "
+            f"val={len(val_meshes)} meshes / {len(val_ds)} samples, "
+            f"test={len(test_meshes)} meshes / {len(test_ds)} samples — all disjoint ✓"
+        )
 
 
 def main() -> None:
@@ -212,6 +321,17 @@ def main() -> None:
         help="A: sketch+prompt → albedo+roughness+lighting_sh; B: sketch+prompt → render",
     )
     parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument(
+        "--split", choices=["train", "val", "test", "all"], default="all",
+        help="Mesh-level split (issue #43). Holds out whole meshes, not random samples.",
+    )
+    parser.add_argument("--val-fraction", type=float, default=0.1)
+    parser.add_argument("--test-fraction", type=float, default=0.1)
+    parser.add_argument("--split-seed", type=int, default=42)
+    parser.add_argument(
+        "--verify-split", action="store_true",
+        help="After loading, build train/val/test datasets and assert their mesh sets are disjoint.",
+    )
     args = parser.parse_args()
     _smoke_test(args)
 
