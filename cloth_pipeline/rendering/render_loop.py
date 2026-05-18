@@ -313,6 +313,14 @@ def run_generation(
             current_mesh_path = mesh_files[mesh_idx]
         mesh_name = os.path.basename(current_mesh_path).replace(".obj", "")
 
+        # Issue #49: DF3D textures contain photogrammetry-rig lighting baked into
+        # the pixel values. Boost Mitsuba intensity so scene lighting dominates the
+        # baked layer (~2x baseline range). Bounded supervision mismatch only;
+        # principled cleanup tracked in #50.
+        df3d_lighting_boost = (
+            2.0 if bucket_for_mesh_path(current_mesh_path) == "df3d" else 1.0
+        )
+
         # Calculate bounding box for this specific mesh to frame it correctly
         loaded_shape = mi.load_dict({'type': 'obj', 'filename': current_mesh_path})
         bbox    = loaded_shape.bbox()
@@ -367,10 +375,12 @@ def run_generation(
         dx, dy, dz = float(_dir[0]), float(_dir[1]), float(_dir[2])
 
         # Stronger neutral fill so fabrics (especially dark/rough) stay readable.
-        env_scale = random.uniform(0.45, 0.75)
+        # For DF3D, boost both env + key by df3d_lighting_boost (#49) so Mitsuba
+        # dominates the baked photogrammetry layer in the texture.
+        env_scale = random.uniform(0.45, 0.75) * df3d_lighting_boost
         base_env_rgb = [env_scale, env_scale, env_scale]
 
-        key_irr = random.uniform(4.5, 9.0)
+        key_irr = random.uniform(4.5, 9.0) * df3d_lighting_boost
         base_key_rgb = [tint_key[j] * key_irr for j in range(3)]
 
         lights_meta = [
@@ -481,27 +491,52 @@ def run_generation(
         # albedo/normal/roughness PBR ground truth.
         cache_key = (mesh_idx, material_idx)
         if cache_key not in material_pattern_cache:
-            material_desc = random.choice(list(FABRIC_PRESETS.keys()))
-            preset = FABRIC_PRESETS[material_desc]
-
-            def _sample(key, _p=preset):
-                lo, hi = _p[key]
-                return random.uniform(lo, hi)
-
-            # Issue #36 — DF3D bundled-texture passthrough.
-            # For meshes from meshes/df3d/, use the photogrammetry-baked texture
-            # shipped alongside the mesh (.../<garment-id>/<garment-id>_tex.png)
-            # instead of generating a random procedural pattern. Roughness, lighting
-            # and camera stay random per sample (those are scene parameters, not
-            # mesh-bundled).
             df3d_tex = df3d_bundled_texture(current_mesh_path)
-            if df3d_tex is not None:
+            is_df3d = df3d_tex is not None
+
+            if is_df3d:
+                # Issue #42 (sub-task 1.1) — DF3D path.
+                # We do not know the real fabric of a DF3D scan, so picking a
+                # FABRIC_PRESETS category at random would be a lie (the prompt
+                # would say "silk material" while the texture is cotton, etc.).
+                # And per-sample random BRDF rolls produce contradictory training
+                # signal (same garment, different shininess across samples).
+                # Use neutral diffuse defaults: roughness=1.0, no specular, no
+                # sheen, no clearcoat. All DF3D samples share these — only the
+                # bundled photogrammetry texture, lighting and camera vary.
+                material_desc = "neutral"
+                rolled = {
+                    'roughness':   1.0,   # diffuse-only
+                    'specular':    0.0,
+                    'sheen':       0.0,
+                    'sheen_tint':  0.0,
+                    'anisotropic': 0.0,
+                    'spec_trans':  0.0,
+                    'clearcoat':   0.0,
+                }
                 img = None
                 pattern_name = "photogrammetry"
                 pattern_params = {"source": "df3d_bundled", "tex_path": df3d_tex}
                 # No tiling — bundled texture is UV-mapped 1:1 to the mesh.
                 tile_u = tile_v = 1.0
             else:
+                # Procedural / manual path — synthesize plausible cloth via FABRIC_PRESETS.
+                material_desc = random.choice(list(FABRIC_PRESETS.keys()))
+                preset = FABRIC_PRESETS[material_desc]
+
+                def _sample(key, _p=preset):
+                    lo, hi = _p[key]
+                    return random.uniform(lo, hi)
+
+                rolled = {
+                    'roughness':   _sample('roughness'),
+                    'specular':    _sample('specular'),
+                    'sheen':       _sample('sheen'),
+                    'sheen_tint':  _sample('sheen_tint'),
+                    'anisotropic': _sample('anisotropic'),
+                    'spec_trans':  _sample('spec_trans'),
+                    'clearcoat':   _sample('clearcoat'),
+                }
                 img, pattern_name, pattern_params = generate_random_albedo_map()
                 uv_u_range, uv_v_range = 1.0, 1.0
                 try:
@@ -523,13 +558,13 @@ def run_generation(
 
             material_pattern_cache[cache_key] = {
                 'material_desc':   material_desc,
-                'roughness':       _sample('roughness'),
-                'specular':        _sample('specular'),
-                'sheen':           _sample('sheen'),
-                'sheen_tint':      _sample('sheen_tint'),
-                'anisotropic':     _sample('anisotropic'),
-                'spec_trans':      _sample('spec_trans'),
-                'clearcoat':       _sample('clearcoat'),
+                'roughness':       rolled['roughness'],
+                'specular':        rolled['specular'],
+                'sheen':           rolled['sheen'],
+                'sheen_tint':      rolled['sheen_tint'],
+                'anisotropic':     rolled['anisotropic'],
+                'spec_trans':      rolled['spec_trans'],
+                'clearcoat':       rolled['clearcoat'],
                 'img':             img,
                 'pattern_name':    pattern_name,
                 'pattern_params':  pattern_params,
@@ -557,43 +592,33 @@ def run_generation(
         tile_v          = mp['tile_v']
 
         # --- DYNAMIC PROMPT ---
-        # For DF3D meshes: use the garment category (e.g. "long-sleeve dress")
-        # from garment_type_list.txt and drop the procedural-pattern boilerplate
-        # (no random pattern was applied — bundled photogrammetry texture is used).
+        # For DF3D meshes (issue #42 sub-task 1.1): no fabric material word in
+        # the prompt (we don't know the real fabric), no fake mesh-stem name
+        # (the bare "model_cleaned" is uninformative). Use the garment category
+        # from garment_type_list.txt instead. The BLIP captions from PR #39
+        # are intentionally NOT injected here — audit showed ~13% of them
+        # contain hallucinated damage ("broken shirt with holes"), which would
+        # actively mistrain the network. Issue #38 will replace BLIP with
+        # Qwen2-VL on render.png and wire the result back in.
+        #
         # For other buckets: original template with mesh-name + material + pattern.
         bucket_name = bucket_for_mesh_path(current_mesh_path)
         if bucket_name == "df3d":
-            # We do NOT know the actual fabric material of a DF3D scan — the visible
-            # albedo is whatever was photographed. The `material_desc` we sampled was
-            # only to roll random BRDF parameters (roughness/sheen). Putting it in the
-            # prompt would lie to the network ("silk" with a wool-looking scan), so we
-            # drop it. We DO keep what's truthful: the garment category (from
-            # garment_type_list.txt), the rolled surface response, and the
-            # photogrammetry origin.
             cat = df3d_garment_category(current_mesh_path)
             cat_phrase = cat.replace("_", " ") if cat else "garment"
-            rough_desc_p = "matte" if roughness > 0.5 else "smooth" if roughness > 0.2 else "glossy"
-            sheen_desc_p = "with a velvety sheen" if sheen > 0.6 else "with subtle highlights"
             obj_name = cat_phrase
-        
-        # DF3D specific: Try to get detailed caption from the offline VLM pass
-        df3d_id = None
-        if "df3d" in current_mesh_path:
-             from cloth_pipeline.paths import _df3d_garment_id
-             df3d_id = _df3d_garment_id(current_mesh_path)
-
-        visual_desc = ""
-        if df3d_id and df3d_id in _DF3D_CAPTIONS:
-            visual_desc = f"{_DF3D_CAPTIONS[df3d_id]}, "
-        elif pattern_name == "photogrammetry":
-            visual_desc = "photogrammetry texture, "
-
-        obj_name = _clean_mesh_name(mesh_name)
-        keyword = f"{material_desc} {obj_name}"
-        prompt = (
-            f"a photorealistic 3D render of a {material_desc} {obj_name}, "
-            f"{visual_desc}physical rendering, detailed fabric folds"
-        )
+            keyword = cat_phrase
+            prompt = (
+                f"a photorealistic 3D render of a real {cat_phrase}, "
+                f"photogrammetry-scanned fabric, detailed folds and drape"
+            )
+        else:
+            obj_name = _clean_mesh_name(mesh_name)
+            keyword = f"{material_desc} {obj_name}"
+            prompt = (
+                f"a photorealistic 3D render of a {material_desc} {obj_name} with "
+                f"{pattern_name} pattern, physical rendering, detailed fabric folds"
+            )
 
         # --- TEXTURE-FOCUSED PROMPT (for prompt.txt only) ---
         rough_desc = "matte surface" if roughness > 0.5 else "smooth finish" if roughness > 0.2 else "glossy finish"
