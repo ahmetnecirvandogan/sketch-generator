@@ -8,7 +8,8 @@
 # Logs:     logs/sgen-full-<jobid>.out
 #
 #SBATCH --job-name=sgen-full
-#SBATCH --gres=gpu:a100:1
+#SBATCH --partition=avg
+#SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=24:00:00
@@ -20,8 +21,8 @@ set -euo pipefail
 mkdir -p logs
 cd "$HOME/sketch-generator"
 
-if [[ -f .venv/bin/activate ]]; then
-    source .venv/bin/activate
-fi
+# Activate sketchgen conda env (torch + mitsuba + transformers + PIL).
+source /opt/ohpc/pub/compiler/conda3/latest/etc/profile.d/conda.sh
+conda activate sketchgen
 
 bash scripts/first_training_run.sh --full

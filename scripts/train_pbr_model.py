@@ -64,6 +64,9 @@ def train(
     lambda_lighting: float = 0.1,
     checkpoint_dir: str | Path = "checkpoints",
     save_every_epochs: int = 5,
+    val_fraction: float = 0.1,
+    test_fraction: float = 0.1,
+    split_seed: int = 42,
 ) -> None:
     # Auto-detect best device (CUDA for VALAR, MPS for Mac, CPU as fallback)
     if torch.cuda.is_available():
@@ -72,7 +75,7 @@ def train(
         device = torch.device("mps")
     else:
         device = torch.device("cpu")
-        
+
     text_kind = "CLIP" if use_clip else "stub"
     print(
         f"=== Starting Training | Variant: {variant.upper()} | Batch: {batch_size} | "
@@ -82,81 +85,132 @@ def train(
     checkpoint_dir = Path(checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    loader = make_dataloader(
-        metadata_path=metadata_path, 
-        variant=variant, 
-        batch_size=batch_size, 
+    # Mesh-level deterministic split (Issue #43): whole meshes are held out so
+    # validation measures generalization to *unseen geometry*, not just unseen lighting.
+    train_loader = make_dataloader(
+        metadata_path=metadata_path,
+        variant=variant,
+        batch_size=batch_size,
         shuffle=True,
+        split="train",
+        val_fraction=val_fraction,
+        test_fraction=test_fraction,
+        split_seed=split_seed,
     )
-    
+    val_loader = make_dataloader(
+        metadata_path=metadata_path,
+        variant=variant,
+        batch_size=batch_size,
+        shuffle=False,
+        split="val",
+        val_fraction=val_fraction,
+        test_fraction=test_fraction,
+        split_seed=split_seed,
+    )
+
     model = make_model(variant=variant, base_channels=base_channels, use_clip=use_clip).to(device)
-    model.train()
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
-    total_batches = len(loader)
-    print(f"Dataset loaded. Total batches per epoch: {total_batches}")
+    total_train_batches = len(train_loader)
+    total_val_batches = len(val_loader)
+    print(
+        f"Dataset loaded. Train: {len(train_loader.dataset)} samples / {total_train_batches} batches"
+        f" | Val: {len(val_loader.dataset)} samples / {total_val_batches} batches"
+        f" | split_seed={split_seed}"
+    )
 
     t0_global = time.time()
-    
+    best_val_loss = float("inf")
+
     for epoch in range(1, epochs + 1):
         t0_epoch = time.time()
+
+        # ── Training pass ──────────────────────────────────────────────────
+        model.train()
         epoch_losses = []
         epoch_components = {}
-        
-        for batch_idx, batch in enumerate(loader):
-            # Move tensors to device; leave list[str] (prompt) on CPU.
+
+        for batch_idx, batch in enumerate(train_loader):
             batch = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
 
             optimizer.zero_grad()
             outputs = model(batch["sketch"], batch["prompt"])
-            
+
             loss, components = compute_loss(
                 outputs, batch, variant=variant,
                 lambda_roughness=lambda_roughness, lambda_lighting=lambda_lighting,
             )
-            
+
             loss.backward()
             optimizer.step()
 
             epoch_losses.append(loss.item())
-            
-            # Accumulate components for logging
             for k, v in components.items():
                 epoch_components[k] = epoch_components.get(k, 0.0) + v
-                
-            if (batch_idx + 1) % max(1, total_batches // 5) == 0:
-                print(f"  Epoch [{epoch}/{epochs}] Step [{batch_idx + 1}/{total_batches}] Loss: {loss.item():.4f}")
 
-        # Average losses for the epoch
-        avg_loss = sum(epoch_losses) / len(epoch_losses)
-        avg_comps = {k: v / len(epoch_losses) for k, v in epoch_components.items()}
-        
+            if (batch_idx + 1) % max(1, total_train_batches // 5) == 0:
+                print(f"  Epoch [{epoch}/{epochs}] Step [{batch_idx + 1}/{total_train_batches}] Loss: {loss.item():.4f}")
+
+        avg_train_loss = sum(epoch_losses) / len(epoch_losses)
+        avg_train_comps = {k: v / len(epoch_losses) for k, v in epoch_components.items()}
+
+        # ── Validation pass (no grad, eval mode) ──────────────────────────
+        model.eval()
+        val_losses = []
+        val_components = {}
+        with torch.no_grad():
+            for batch in val_loader:
+                batch = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
+                outputs = model(batch["sketch"], batch["prompt"])
+                loss, components = compute_loss(
+                    outputs, batch, variant=variant,
+                    lambda_roughness=lambda_roughness, lambda_lighting=lambda_lighting,
+                )
+                val_losses.append(loss.item())
+                for k, v in components.items():
+                    val_components[k] = val_components.get(k, 0.0) + v
+
+        avg_val_loss = sum(val_losses) / len(val_losses)
+        avg_val_comps = {k: v / len(val_losses) for k, v in val_components.items()}
+
         elapsed_epoch = time.time() - t0_epoch
-        comp_str = " | ".join(f"{k}: {v:.4f}" for k, v in avg_comps.items() if k != "total")
-        
-        print(f"-> Epoch {epoch} complete in {elapsed_epoch:.1f}s | Avg Loss: {avg_loss:.4f} | {comp_str}")
+        train_comp_str = " | ".join(f"{k}: {v:.4f}" for k, v in avg_train_comps.items() if k != "total")
+        val_comp_str = " | ".join(f"val_{k}: {v:.4f}" for k, v in avg_val_comps.items() if k != "total")
+        print(
+            f"-> Epoch {epoch} done in {elapsed_epoch:.1f}s | "
+            f"train_loss: {avg_train_loss:.4f} | val_loss: {avg_val_loss:.4f} | "
+            f"{train_comp_str} | {val_comp_str}"
+        )
 
-        # Save latest checkpoint
+        # ── Checkpoints ────────────────────────────────────────────────────
         checkpoint_state = {
             "epoch": epoch,
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "variant": variant,
             "base_channels": base_channels,
-            "avg_loss": avg_loss,
+            "avg_loss": avg_train_loss,        # kept for backwards-compat with test_pr47.sh
+            "train_loss": avg_train_loss,
+            "val_loss": avg_val_loss,
         }
-        
+
         latest_path = checkpoint_dir / f"latest_variant_{variant}.pt"
         torch.save(checkpoint_state, latest_path)
-        
-        # Save numbered checkpoints periodically
+
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            best_path = checkpoint_dir / f"best_variant_{variant}.pt"
+            torch.save(checkpoint_state, best_path)
+            print(f"   ✓ new best val_loss={avg_val_loss:.4f} → {best_path.name}")
+
         if epoch % save_every_epochs == 0:
             epoch_path = checkpoint_dir / f"epoch_{epoch}_variant_{variant}.pt"
             torch.save(checkpoint_state, epoch_path)
 
     total_time = time.time() - t0_global
     print(f"\n=== Training Complete in {total_time/60:.1f} minutes ===")
-    print(f"Latest checkpoint saved to {latest_path}")
+    print(f"Best val_loss: {best_val_loss:.4f}")
+    print(f"Latest checkpoint: {latest_path}")
 
 
 def main() -> None:
@@ -178,7 +232,19 @@ def main() -> None:
     parser.add_argument("--lambda-lighting", type=float, default=0.1)
     parser.add_argument("--checkpoint-dir", default="checkpoints")
     parser.add_argument("--save-every", type=int, default=5, help="Save a checkpoint every N epochs")
-    
+    parser.add_argument(
+        "--val-fraction", type=float, default=0.1,
+        help="Fraction of meshes held out as validation set (mesh-level split).",
+    )
+    parser.add_argument(
+        "--test-fraction", type=float, default=0.1,
+        help="Fraction of meshes reserved as test set (not used in training; for later eval).",
+    )
+    parser.add_argument(
+        "--split-seed", type=int, default=42,
+        help="Seed for deterministic mesh-level train/val/test partition.",
+    )
+
     args = parser.parse_args()
 
     train(
@@ -193,6 +259,9 @@ def main() -> None:
         lambda_lighting=args.lambda_lighting,
         checkpoint_dir=args.checkpoint_dir,
         save_every_epochs=args.save_every,
+        val_fraction=args.val_fraction,
+        test_fraction=args.test_fraction,
+        split_seed=args.split_seed,
     )
 
 
