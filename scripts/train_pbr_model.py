@@ -93,12 +93,21 @@ def train(
     model.train()
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
+    start_epoch = 1
+    latest_ckpt_path = checkpoint_dir / f"latest_variant_{variant}.pt"
+    if latest_ckpt_path.exists():
+        print(f"Resuming from checkpoint: {latest_ckpt_path}")
+        ckpt = torch.load(latest_ckpt_path, map_location=device)
+        model.load_state_dict(ckpt["model_state_dict"])
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        start_epoch = ckpt["epoch"] + 1
+
     total_batches = len(loader)
     print(f"Dataset loaded. Total batches per epoch: {total_batches}")
 
     t0_global = time.time()
     
-    for epoch in range(1, epochs + 1):
+    for epoch in range(start_epoch, epochs + 1):
         t0_epoch = time.time()
         epoch_losses = []
         epoch_components = {}
